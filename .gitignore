@@ -1,0 +1,13 @@
+.lake/
+build/
+lake-manifest.json
+
+# Runtime state written by chuhan_serve
+ChuHan/MISSING_ASSETS.txt.tmp
+*.log
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
