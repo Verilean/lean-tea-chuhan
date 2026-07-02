@@ -644,6 +644,172 @@ function render() {
   wireGmHandlers();
   wireSandboxSim();
   wireAtmo();
+  wireBattle();
+}
+
+// ─── #3 · Mass-battle showpiece. A ⚔ button opens a fullscreen overlay
+// where the two armies clash — thousands of soldiers on WebGPU
+// (instanced quads), or a few thousand dots on a Canvas-2D fallback.
+// Army sizes track the world (漢 vs 楚 total control). Ephemeral. ────
+const BATTLE_WGSL = `
+struct U { time:f32, resx:f32, resy:f32, clash:f32 };
+@group(0) @binding(0) var<uniform> u:U;
+struct VO { @builtin(position) pos:vec4f, @location(0) col:vec3f, @location(1) uv:vec2f, @location(2) alive:f32 };
+@vertex fn vs(@location(0) corner:vec2f, @location(1) sold:vec4f) -> VO {
+  let side = sold.z; let t = u.time; let seed = sold.w;
+  let dir = select(1.0, -1.0, side > 0.5);
+  var cx = clamp(sold.x + dir * t * 0.05 * (0.6 + seed*0.8), 0.06, 0.94);
+  let cy = sold.y + sin(t*3.0 + seed*30.0)*0.01;
+  let near = 1.0 - abs(cx - 0.5) * 2.0;
+  let dead = step(seed, u.clash * near * 0.9);
+  let sz = 0.006;
+  let px = (cx + corner.x*sz) * 2.0 - 1.0;
+  let py = 1.0 - (cy + corner.y*sz*(u.resx/u.resy)) * 2.0;
+  var o:VO;
+  o.pos = vec4f(px, py, 0.0, 1.0);
+  o.col = select(vec3f(0.3,0.55,1.0), vec3f(1.0,0.35,0.3), side>0.5);
+  o.uv = corner; o.alive = 1.0 - dead;
+  return o;
+}
+@fragment fn fs(in:VO) -> @location(0) vec4f {
+  if (in.alive < 0.5) { discard; }
+  if (length(in.uv) > 1.0) { discard; }
+  return vec4f(in.col * (1.2 - length(in.uv)*0.5), 1.0);
+}`;
+
+let battle = { raf: null, render: null, starting: false };
+
+function armyStrength(faction) {
+  const w = state.world; if (!w) return 20;
+  let s = 0; for (const r of w.regions) if (r.owner === faction) s += r.ctrl;
+  return Math.max(20, s);
+}
+
+function battle2D(canvas, hanN, chuN) {
+  const ctx = canvas.getContext('2d'); const W = canvas.width, H = canvas.height;
+  const N = Math.min(2400, Math.round((hanN + chuN) * 4));
+  const hanShare = hanN / (hanN + chuN);
+  const sol = [];
+  for (let i = 0; i < N; i++) {
+    const side = (i / N) < hanShare ? 0 : 1;
+    sol.push({
+      x: side ? W*0.72 + Math.random()*W*0.24 : W*0.04 + Math.random()*W*0.24,
+      y: 30 + Math.random()*(H-60), side, seed: Math.random(), dead: false
+    });
+  }
+  const t0 = performance.now();
+  return () => {
+    const t = (performance.now() - t0)/1000; const clash = Math.min(t/6, 1);
+    ctx.fillStyle = '#0d0b08'; ctx.fillRect(0,0,W,H);
+    for (const s of sol) {
+      if (s.dead) continue;
+      s.x += (s.side ? -1 : 1) * (0.5 + s.seed) * 1.3;
+      s.x = Math.max(W*0.05, Math.min(W*0.95, s.x));
+      const near = 1 - Math.abs(s.x - W*0.5)/(W*0.5);
+      if (s.seed < clash * near * 0.9) { s.dead = true; continue; }
+      ctx.fillStyle = s.side ? '#ff5a4d' : '#4d8cff';
+      ctx.fillRect(s.x, s.y + Math.sin(t*3 + s.seed*30)*2, 2.6, 2.6);
+    }
+  };
+}
+
+async function battleWebGPU(canvas, hanN, chuN) {
+  if (!navigator.gpu) return null;
+  const adapter = await navigator.gpu.requestAdapter(); if (!adapter) return null;
+  const device = await adapter.requestDevice();
+  const ctx = canvas.getContext('webgpu'); if (!ctx) return null;
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({ device, format, alphaMode: 'opaque' });
+  device.pushErrorScope('validation');
+  const mod = device.createShaderModule({ code: BATTLE_WGSL });
+  const pipe = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: mod, entryPoint: 'vs', buffers: [
+      { arrayStride: 8, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] },
+      { arrayStride: 16, stepMode: 'instance', attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x4' }] }
+    ]},
+    fragment: { module: mod, entryPoint: 'fs', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' }
+  });
+  if (await device.popErrorScope()) return null;
+  // unit quad (two triangles)
+  const quad = new Float32Array([-1,-1, 1,-1, 1,1,  -1,-1, 1,1, -1,1]);
+  const qbuf = device.createBuffer({ size: quad.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(qbuf, 0, quad);
+  const total = Math.min(30000, Math.round((hanN + chuN) * 60));
+  const hanCount = Math.round(total * hanN / (hanN + chuN));
+  const data = new Float32Array(total * 4);
+  for (let i = 0; i < total; i++) {
+    const side = i < hanCount ? 0 : 1;
+    data[i*4+0] = side ? 0.72 + Math.random()*0.24 : 0.04 + Math.random()*0.24;
+    data[i*4+1] = 0.06 + Math.random()*0.88;
+    data[i*4+2] = side;
+    data[i*4+3] = Math.random();
+  }
+  const ibuf = device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(ibuf, 0, data);
+  const ubuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const bind = device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubuf } }] });
+  return (t) => {
+    device.queue.writeBuffer(ubuf, 0, new Float32Array([t, canvas.width, canvas.height, Math.min(t/6, 1)]));
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), clearValue: {r:0.05,g:0.043,b:0.03,a:1}, loadOp: 'clear', storeOp: 'store' }] });
+    pass.setPipeline(pipe); pass.setVertexBuffer(0, qbuf); pass.setVertexBuffer(1, ibuf);
+    pass.draw(6, total); pass.end();
+    device.queue.submit([enc.finish()]);
+  };
+}
+
+function ensureBattleOverlay() {
+  let ov = document.getElementById('battleOverlay');
+  if (ov) return ov;
+  ov = document.createElement('div');
+  ov.id = 'battleOverlay';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,0.86);display:none;flex-direction:column;align-items:center;justify-content:center';
+  ov.innerHTML =
+    "<div style='color:#f0e6d2;margin-bottom:8px;font-size:15px'>会戦 ― <span style='color:#4d8cff'>漢</span> vs <span style='color:#ff5a4d'>楚</span></div>" +
+    "<canvas id='battleCanvas2' width='840' height='440' style='max-width:94vw;height:auto;background:#0d0b08;border:1px solid #4a3f2f;border-radius:8px'></canvas>" +
+    "<button id='battleClose' class='btn btn-ghost' style='margin-top:10px'>戻る</button>";
+  document.body.appendChild(ov);
+  ov.querySelector('#battleClose').addEventListener('click', closeBattle);
+  return ov;
+}
+function battleLoop() {
+  battle.t0 = performance.now();
+  const frame = () => {
+    const ov = document.getElementById('battleOverlay');
+    if (!ov || ov.style.display === 'none' || !battle.render) { battle.raf = null; return; }
+    battle.render((performance.now() - battle.t0) / 1000);
+    battle.raf = requestAnimationFrame(frame);
+  };
+  battle.raf = requestAnimationFrame(frame);
+}
+function openBattle() {
+  if (battle.starting) return;
+  battle.starting = true;
+  const ov = ensureBattleOverlay();
+  ov.style.display = 'flex';
+  const c = ov.querySelector('#battleCanvas2');
+  const hanN = armyStrength('han'), chuN = armyStrength('chu');
+  const start2D = () => { battle.render = battle2D(c, hanN, chuN); battle.starting = false; battleLoop(); };
+  (async () => {
+    let r = null;
+    try { r = await battleWebGPU(c, hanN, chuN); } catch (e) { r = null; }
+    if (r) { battle.render = r; battle.starting = false; battleLoop(); }
+    else start2D();
+  })();
+}
+function closeBattle() {
+  const ov = document.getElementById('battleOverlay');
+  if (ov) ov.style.display = 'none';
+  if (battle.raf) { cancelAnimationFrame(battle.raf); battle.raf = null; }
+  battle.render = null;
+}
+function wireBattle() {
+  const b = document.getElementById('sbBattle');
+  if (!b || b.dataset.wired) return;
+  b.dataset.wired = '1';
+  b.addEventListener('click', openBattle);
 }
 
 // ─── P3.5 · Atmosphere sky-band. A WGSL fragment shader (WebGPU) tints

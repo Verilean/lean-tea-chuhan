@@ -4400,49 +4400,112 @@ def sbStateWith(state, world) := {
   mini: state.mini, llm: state.llm, resolve: state.resolve, world: world
 }
 
+-- 領有勢力に応じた短い枕詞(文に彩りを添える)。
+def sbAt(r) := sconcat(r.ja, sconcat("（", sconcat(sbName(r.owner), "）")))
+
 -- 一手ぶんの創発イベント。{regions, line} を返す。笑い/葛藤/驚きを混ぜる。
+-- ~24 種。地域の領有・引き当てで文が変わる。
 def sbEvent(world) :=
   let regions := world.regions;
   let n := arrLen(regions);
-  let ev := rngInt() % 9;
+  let ev := rngInt() % 24;
   let ri := rngInt() % n;
   let r := arrGet(regions, ri);
+  let coin := rngInt() % 2 == 0;
   if ev == 0 then
-    {regions: sbAdj(regions, ri, 12),
-     line: sconcat("韓信、密かに陳倉を渡る。", sconcat(r.ja, "の漢軍が勢いづいた。"))}
+    {regions: sbAdj(regions, ri, 14),
+     line: sconcat("韓信、桟道を焼いて敵を欺き、密かに陳倉を渡る。誰も渡れると思わなかった道だ。", sconcat(r.ja, "の漢軍が勢いづく。"))}
   else if ev == 1 then
     (if r.owner == "han"
-     then {regions: sbAdj(regions, ri, -15),
-           line: sconcat("項羽の急襲。", sconcat(r.ja, "の漢の支配が揺らぐ。"))}
-     else {regions: sbAdj(regions, ri, -6),
-           line: sconcat("楚の鉄騎が", sconcat(r.ja, "を圧した。"))})
+     then {regions: sbAdj(regions, ri, -16),
+           line: sconcat("項羽の急襲。半夜の砂塵から三万の鉄騎が湧いた。", sconcat(r.ja, "の漢の支配が音を立てて崩れる。"))}
+     else {regions: sbAdj(regions, ri, -7),
+           line: sconcat("楚の鉄騎が", sconcat(r.ja, "を蹂躙した。項羽の前では、数は意味を失う。"))})
   else if ev == 2 then
-    {regions: sbAdj(regions, sbIdxOf(regions, "guanzhong", 0), 11),
-     line: "關中で秦の残党が旗を上げた。……復興の火種か、ただの残り火か。"}
+    {regions: sbAdj(regions, sbIdxOf(regions, "guanzhong", 0), 12),
+     line: "關中で秦の遺臣が旗を上げた。老兵たちが錆びた戈を磨いている。……復興の火種か、ただの残り火か。"}
   else if ev == 3 then
     (if r.owner == "lords"
-     then {regions: sbOwn(regions, ri, (if rngInt() % 2 == 0 then "han" else "chu")),
-           line: sconcat(r.ja, "の諸侯が寝返った。旗色を読むのが乱世の作法だ。")}
+     then {regions: sbOwn(regions, ri, (if coin then "han" else "chu")),
+           line: sconcat(r.ja, "の諸侯が寝返った。旗色を読むのが乱世の作法、恥じることではない――と本人は言う。")}
      else {regions: regions,
-           line: sconcat(r.ja, "の諸侯は日和見を決め込み、酒を送ってきた。")})
+           line: sconcat(r.ja, "の諸侯は日和見を決め込み、両陣営に同じ酒を送ってきた。")})
   else if ev == 4 then
     {regions: regions,
-     line: "劉邦、酒と美姫に半日を溶かす。……天下は、特に何も起きなかった。"}
+     line: "劉邦、酒と美姫に半日を溶かす。側近が青ざめる中――天下は、特に、何も起きなかった。"}
   else if ev == 5 then
-    {regions: sbAdj(regions, ri, -10),
-     line: sconcat("飢饉。", sconcat(r.ja, "の民が細り、流れていく。"))}
+    {regions: sbAdj(regions, ri, -12),
+     line: sconcat("飢饉。", sconcat(r.ja, "の民が細り、流れていく。倉を開くべきか、兵に回すべきか。"))}
   else if ev == 6 then
     (if r.owner == "han"
-     then {regions: sbAdj(regions, ri, 8),
-           line: sconcat("名もなき一兵卒が", sconcat(r.ja, "で武功を立てた。誰も、その名を知らぬ。"))}
+     then {regions: sbAdj(regions, ri, 9),
+           line: sconcat("名もなき一兵卒が", sconcat(r.ja, "で城壁を最初に越えた。誰も、その名を知らぬ。恩賞は隊長の懐へ。"))}
      else {regions: regions,
-           line: "斥候が手ぶらで帰ってきた。腹だけ空かせて。"})
+           line: "斥候が手ぶらで帰ってきた。腹だけ空かせて、言い訳だけは達者に。"})
   else if ev == 7 then
     {regions: regions,
      line: "呂雉より書簡。「留守は、私が守ります」――その端正な筆致に、なぜか背が冷えた。"}
+  else if ev == 8 then
+    (if r.owner == "chu"
+     then {regions: sbAdj(regions, ri, 10),
+           line: sconcat("范増が三度、玉玦を挙げた。項羽が珍しく耳を貸し、", sconcat(r.ja, "の楚が締まる。"))}
+     else {regions: regions,
+           line: "范増、また項羽に容れられず。「豎子ともに謀るに足らず」と老軍師は杖を鳴らす。"})
+  else if ev == 9 then
+    (if r.owner == "han"
+     then {regions: sbAdj(regions, ri, 12),
+           line: sconcat("張良、帷幄の中に謀り、千里の外に勝つ。派手さはない。だが", sconcat(r.ja, "の趨勢が静かに漢へ傾いた。"))}
+     else {regions: regions, line: "張良は病と称して動かない。彼が動かぬ時は、動く価値がない時だ。"})
+  else if ev == 10 then
+    {regions: sbAdj(regions, sbIdxOf(regions, "hanzhong", 0), 8),
+     line: "蕭何、關中から兵糧と壮丁を絶やさず送り続ける。地味だ。だが、これが無ければ全部が崩れる。"}
+  else if ev == 11 then
+    {regions: sbAdj(regions, ri, -14),
+     line: sconcat("疫病が陣を舐める。", sconcat(r.ja, "では敵も味方も同じように倒れた。天は、依怙贔屓をしない。"))}
+  else if ev == 12 then
+    {regions: regions,
+     line: "虞姫が舞う。楚の陣に束の間の静けさ。項羽の横顔だけが、いつもより幼く見えた。"}
+  else if ev == 13 then
+    (if r.owner == "lords" || r.ctrl < 40
+     then {regions: sbAdj(regions, ri, 8),
+           line: sconcat(r.ja, "の民が自ら帰順を申し出た。苛政に飽いたのだ。徳は、時に兵より速い。")}
+     else {regions: regions, line: sconcat(r.ja, "の里で童歌が流行る。歌詞は、次の天下人の名を、まだ決めかねている。")})
+  else if ev == 14 then
+    {regions: sbAdj(regions, ri, -6),
+     line: sconcat("使者が席で失言し、その場で開戦に転がった。", sconcat(r.ja, "が巻き添えを食う。舌は、剣より軽率だ。"))}
+  else if ev == 15 then
+    {regions: sbAdj(regions, ri, 7),
+     line: sconcat("時ならぬ雨が渡河を助けた。", sconcat(r.ja, "で天が味方をした――今日だけは。"))}
+  else if ev == 16 then
+    (if r.owner == "han"
+     then {regions: sbAdj(regions, ri, -9),
+           line: sconcat(r.ja, "で内通が露見した。将の一人が楚と通じていた。斬るか、抱き込むか、見て見ぬふりか。")}
+     else {regions: regions, line: "投降者が二人、真夜中に陣へ転がり込んできた。値打ちものか、間者か。"})
+  else if ev == 17 then
+    {regions: sbAdj(regions, sbIdxOf(regions, "hanzhong", 0), 6),
+     line: "韓信が「多々益々弁ず(兵は多いほど良い)」と嘯いた。頼もしい。……そして、少し、危うい。"}
+  else if ev == 18 then
+    (if r.owner == "chu"
+     then {regions: sbAdj(regions, ri, 9),
+           line: sconcat(r.ja, "で項羽が降兵を坑にした。恐怖が広がり、抵抗は減る。だが――民心も、共に凍った。")}
+     else {regions: regions, line: "項羽の武勇伝がまた一つ増えた。敵はそれを聞いて、なぜか少し安心する。"})
+  else if ev == 19 then
+    {regions: sbOwn(regions, ri, (if coin then "han" else "chu")),
+     line: sconcat("諸侯連合に亀裂。", sconcat(r.ja, "が一夜で旗を変えた。乱世の同盟は、朝と夜で色が違う。"))}
+  else if ev == 20 then
+    {regions: regions,
+     line: sconcat("軍議が紛糾し、結論が出ぬまま夜が明けた。", sconcat(sbAt(r), "の件は、また明日。"))}
+  else if ev == 21 then
+    {regions: sbAdj(regions, ri, (if coin then 6 else -6)),
+     line: sconcat("風向きが変わった。", sconcat(sbAt(r), "を軸に、天下がひとつ、軋みながら動く。"))}
+  else if ev == 22 then
+    (if r.owner == "qin"
+     then {regions: sbAdj(regions, ri, -10),
+           line: sconcat("諸将が", sconcat(r.ja, "の秦残党を挟撃した。復興の芽は、まだ細い。"))}
+     else {regions: regions, line: "咸陽の焼け跡から、玉璽の噂が流れる。持つ者が、天命を持つという。"})
   else
-    {regions: sbAdj(regions, ri, (if rngInt() % 2 == 0 then 5 else -5)),
-     line: sconcat("天下は", sconcat(r.ja, "を軸に、静かに一つ動いた。"))}
+    {regions: sbAdj(regions, ri, (if coin then 5 else -8)),
+     line: sconcat("斥候曰く、", sconcat(sbAt(r), "の空気が張り詰めている。何かが、起きる前の静けさだ。"))}
 
 def sbTick(world) :=
   let e := sbTickEvent(world);
@@ -4563,6 +4626,7 @@ def viewSandbox(state) :=
     "<div style='display:flex;gap:8px;margin-top:8px;flex-wrap:wrap'>",
     "<button id='gmSend' class='btn btn-primary'>行動する（AI 軍師）</button>",
     button("primary", {tag: "sbAdvance"}, "季を進める（静観）▶"),
+    "<button id='sbBattle' class='btn btn-ghost'>⚔ 会戦を見る</button>",
     button("ghost", {tag: "toTitle"}, "タイトルへ"),
     "</div></div></div>"
   ])
