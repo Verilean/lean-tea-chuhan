@@ -3058,24 +3058,28 @@ def update(msg, state) :=
                        char: "", sceneId: "", beat: 0,
                        stats: state.stats, flags: state.flags,
                        battle: state.battle, endingId: "", toast: "" , mini: state.mini, llm: state.llm, resolve: state.resolve}
-  | "enterSandbox" => sbStateWith(state, initWorld("sandbox"))
+  | "sbSetup" => { phase: "sbSetup", lang: state.lang,
+                       char: "", sceneId: "", beat: 0,
+                       stats: state.stats, flags: state.flags,
+                       battle: state.battle, endingId: "", toast: "" , mini: state.mini, llm: state.llm, resolve: state.resolve}
+  | "sbStart" => sbStateWith(state, initWorldFor(msg.anchor, msg.mode))
   | "sbAdvance" => sbStateWith(state, sbTick(state.world))
   | "gmSubmit" => (
     let w := state.world;
     sbStateWith(state,
       sbWorld(w.mode, w.year, w.season, w.loc, w.regions,
-        arrPush(w.log, sconcat("▶ 劉邦: ", msg.text)), 1)))
+        arrPush(w.log, sconcat(sconcat("▶ ", sconcat(w.who, ": ")), msg.text)), 1, w.who)))
   | "gmResult" => (
     let w := state.world;
     let regions2 := sbApplyDeltas(w.regions, msg.deltas, 0);
     sbStateWith(state,
       sbWorld(w.mode, sbNextYear(w.year, w.season), sbNextSeason(w.season),
-        w.loc, regions2, arrPush(w.log, msg.narration), 0)))
+        w.loc, regions2, arrPush(w.log, msg.narration), 0, w.who)))
   | "gmError" => (
     let w2 := sbTick(state.world);
     sbStateWith(state,
       sbWorld(w2.mode, w2.year, w2.season, w2.loc, w2.regions,
-        arrPush(w2.log, sconcat("（AI 不通ゆえ天下は独りでに動いた）", msg.text)), 0)))
+        arrPush(w2.log, "（AI 不通ゆえ、天下は独りでに動いた）"), 0, w2.who)))
   | "toTitle" => { phase: "title", lang: state.lang,
                        char: "", sceneId: "", beat: 0,
                        stats: state.stats, flags: state.flags,
@@ -3731,7 +3735,7 @@ def viewTitle(state) :=
   sjoin([
     "<div class='title-bg'><h1>楚漢恋歌</h1><div class='sub'>CHU·HAN LOVE SONG</div>",
     button("primary", {tag: "startSelect"}, "START"),
-    button("primary", {tag: "enterSandbox"}, "群雄サンドボックス β"),
+    button("primary", {tag: "sbSetup"}, "群雄サンドボックス β"),
     button("primary", {tag: "openGallery"}, "END ギャラリー"),
     "<div class='sub' style='font-size:11px;color:#666;margin-top:60px'>",
     "六つの生、六つの死、六つの恋。<br>BCE 209 ─ 195. Six lives. Six loves. Six deaths.<br><br>",
@@ -4308,14 +4312,71 @@ def sbCount(regions, owner, i, acc) :=
       acc + (if arrGet(regions, i).owner == owner then 1 else 0))
   else acc
 
-def sbWorld(mode, year, season, loc, regions, log, pending) :=
+def sbWorld(mode, year, season, loc, regions, log, pending, who) :=
   {mode: mode, year: year, season: season, loc: loc,
-   regions: regions, log: log, pending: pending}
+   regions: regions, log: log, pending: pending, who: who}
 
-def initWorld(mode) :=
-  sbWorld(mode, 206, 0, "hanzhong", sbRegions,
-    ["漢中。あなたは劉邦。天下はまだ、誰のものでもない。行動を書けば AI の軍師が即興で世を動かし、書かねば季だけが流れていく。"],
-    0)
+-- ── 主人公アンカー ────────────────────────────────────────────────
+def sbAnchorLabel(anchor) :=
+  if anchor == "liubang" then "劉邦"
+  else if anchor == "luzhi" then "呂雉"
+  else if anchor == "qin" then "秦の遺臣"
+  else if anchor == "soldier" then "一兵卒"
+  else "劉邦"
+
+def sbOpening(anchor) :=
+  if anchor == "liubang" then
+    "漢中。あなたは劉邦。天下はまだ、誰のものでもない。行動を書けば軍師が即興で世を動かし、書かねば季だけが流れていく。"
+  else if anchor == "luzhi" then
+    "漢中。あなたは呂雉。夫は野に遊び、酒に溺れる。だが――天下を実際に統べるのが誰になるかは、まだ、決まっていない。"
+  else if anchor == "qin" then
+    "關中。あなたは秦の遺臣。咸陽は焼かれ、王・子嬰は死んだ。それでも灰の中で誓う――秦を、もう一度この地に。"
+  else if anchor == "soldier" then
+    "漢中の陣。あなたは名も無き一兵卒。天下の趨勢は遠く霞む。まずは、生き延びよ。手柄は、それからだ。"
+  else "漢中。乱世が始まる。"
+
+-- 秦復興アンカー用に關中/咸陽の秦支配を厚くした初期盤面。
+def sbQinBoost(regions) :=
+  let r1 := sbAdj(regions, sbIdxOf(regions, "guanzhong", 0), 25);
+  sbAdj(r1, sbIdxOf(r1, "xianyang", 0), 25)
+
+def initWorldFor(anchor, mode) :=
+  let regions := if anchor == "qin" then sbQinBoost(sbRegions) else sbRegions;
+  let loc := if anchor == "qin" then "guanzhong" else "hanzhong";
+  sbWorld(mode, 206, 0, loc, regions, [sbOpening(anchor)], 0, sbAnchorLabel(anchor))
+
+def initWorld(mode) := initWorldFor("liubang", mode)
+
+-- ── 史実モードの日付アンカー・イベント ───────────────────────────
+-- mode=="hist" のとき、実際の年表に沿って盤面を動かす。sandbox では
+-- 使わない(sbEvent の創発表 + LLM が回る)。
+def sbHistEvent(world) :=
+  let regions := world.regions;
+  let y := world.year;
+  if y == 206 then
+    {regions: sbAdj(regions, sbIdxOf(regions, "guanzhong", 0), 8),
+     line: "【史実 206】鴻門の宴。項羽四十万、關中に迫る。劉邦は百騎で詫びに赴き、辛くも生き延びた。"}
+  else if y == 205 then
+    {regions: sbAdj(sbOwn(regions, sbIdxOf(regions, "pengcheng", 0), "chu"), sbIdxOf(regions, "hanzhong", 0), -20),
+     line: "【史実 205】彭城の大敗。項羽三万の鉄騎が漢五十六万を撃砕。劉邦は数十騎で逃げ、父と妻・呂雉は捕らわれた。"}
+  else if y == 204 then
+    {regions: sbOwn(regions, sbIdxOf(regions, "zhao", 0), "han"),
+     line: "【史実 204】背水之陣。韓信、趙を破る。北の天秤が漢に傾く。"}
+  else if y == 203 then
+    {regions: sbOwn(regions, sbIdxOf(regions, "qi", 0), "han"),
+     line: "【史実 203】韓信、齊を平定。鴻溝の和なり、天下は楚と漢に二分される。"}
+  else if y == 202 then
+    {regions: sbOwn(sbOwn(regions, sbIdxOf(regions, "pengcheng", 0), "han"), sbIdxOf(regions, "wei", 0), "han"),
+     line: "【史実 202】垓下。四面楚歌。項羽、烏江に自刎す。漢、遂に天下を得る。"}
+  else
+    {regions: regions, line: "史実の狭間。世は静かに時を刻む。"}
+
+def sbTickEvent(world) :=
+  if world.mode == "hist" then
+    (if world.season == 0 then sbHistEvent(world)
+     else {regions: world.regions,
+           line: sconcat(sbSeason(world.season), "。兵を養い、天下の風を読む。")})
+  else sbEvent(world)
 
 -- 次の季へ日付を進める(BCE は減算)。{year, season} を返す。
 def sbNextYear(year, season) := if season + 1 > 3 then year - 1 else year
@@ -4384,10 +4445,10 @@ def sbEvent(world) :=
      line: sconcat("天下は", sconcat(r.ja, "を軸に、静かに一つ動いた。"))}
 
 def sbTick(world) :=
-  let e := sbEvent(world);
+  let e := sbTickEvent(world);
   sbWorld(world.mode, sbNextYear(world.year, world.season),
     sbNextSeason(world.season), world.loc,
-    e.regions, arrPush(world.log, e.line), 0)
+    e.regions, arrPush(world.log, e.line), 0, world.who)
 
 -- ── マップ描画(SVG 文字列)──────────────────────────────────────
 def sbRad(ctrl) := if ctrl > 70 then 7 else if ctrl > 40 then 5 else 4
@@ -4443,6 +4504,33 @@ def sbLog(log) :=
   let stop := if n > 6 then n - 6 else 0;
   sbLogFrom(log, n - 1, stop, "")
 
+-- ── アンカー選択画面 ─────────────────────────────────────────────
+def sbAnchorCard(anchor, title, desc) :=
+  sjoin([
+    "<div style='border:1px solid #4a3f2f;border-radius:8px;padding:12px;margin-bottom:10px;background:#17140f'>",
+    "<div style='font-size:16px;color:#f0e6d2;margin-bottom:2px'>", hesc(title), "</div>",
+    "<div style='font-size:12px;color:#9a8d73;margin-bottom:8px'>", hesc(desc), "</div>",
+    "<div style='display:flex;gap:8px'>",
+    button("primary", {tag: "sbStart", anchor: anchor, mode: "sandbox"}, "サンドボックス"),
+    button("ghost", {tag: "sbStart", anchor: anchor, mode: "hist"}, "史実"),
+    "</div></div>"
+  ])
+
+def viewSbSetup(state) :=
+  sjoin([
+    "<div style='max-width:520px;margin:0 auto;padding:20px'>",
+    "<h2 style='margin:0 0 4px'>誰として、乱世を生きる?</h2>",
+    "<div style='font-size:12px;color:#9a8d73;margin-bottom:16px'>",
+    "サンドボックス=史実に縛られぬ創発。史実=実際の年表が動く。行動を書けば AI 軍師が即興する（未接続でもローカルで進む）。</div>",
+    sbAnchorCard("liubang", "劉邦 ― 漢の群雄", "仮面の下に利己を隠した人たらし。天下取りの王道。"),
+    sbAnchorCard("luzhi", "呂雉 ― 冷徹な后", "夫は野に遊ぶ。天下を実際に統べるのは、誰だ。"),
+    sbAnchorCard("qin", "秦の遺臣 ― 復興を期す", "咸陽は焼けた。灰の中で、秦をもう一度。反史実ルート。"),
+    sbAnchorCard("soldier", "名も無き一兵卒", "趨勢は遠い。まず生き延び、手柄はそれから。小さな視点。"),
+    "<div style='margin-top:8px'>",
+    button("ghost", {tag: "toTitle"}, "タイトルへ"),
+    "</div></div>"
+  ])
+
 def viewSandbox(state) :=
   let w := state.world;
   let map := sjoin([
@@ -4452,16 +4540,20 @@ def viewSandbox(state) :=
     "</svg>"
   ]);
   let date := sjoin(["BCE ", numStr(w.year), " ・ ", sbSeason(w.season)]);
+  let modeBadge := if w.mode == "hist" then "史実" else "サンドボックス";
   let pend := if w.pending == 1
     then "<div style='color:#ffd54a;margin:8px 0'>……軍師が知恵を絞っている</div>"
     else "";
   sjoin([
     "<div style='max-width:560px;margin:0 auto;padding:16px'>",
     "<div style='display:flex;justify-content:space-between;align-items:baseline'>",
-    "<h2 style='margin:0'>群雄割拠 ― 劉邦 <span style='font-size:12px;color:#888'>β</span></h2>",
+    "<h2 style='margin:0'>群雄割拠 ― ", hesc(w.who),
+    " <span style='font-size:11px;color:#888'>", hesc(modeBadge), " β</span></h2>",
     "<div style='color:#ffd54a;font-size:15px'>", hesc(date), "</div></div>",
     map,
     sbFactionBar(w.regions),
+    "<div style='text-align:center;color:#8a7d63;font-size:12px;margin-top:6px'>陣中 ― 兵たちが蠢く（勢力の色は支配地に比例）</div>",
+    "<canvas id='sbStage' width='520' height='150' style='width:100%;max-width:540px;height:auto;display:block;margin:4px auto 0;background:linear-gradient(#1c1811,#100e0a);border:1px solid #4a3f2f;border-radius:8px'></canvas>",
     panel("mini", "動静", sbLog(w.log)),
     pend,
     "<div style='margin-top:12px'>",
@@ -4479,6 +4571,7 @@ def bgmForPhase(state) :=
   if state.phase == "title" then "title"
   else if state.phase == "select" then "title"
   else if state.phase == "sandbox" then "court"
+  else if state.phase == "sbSetup" then "title"
   else if state.phase == "gallery" then "title"
   else if state.phase == "ending" then "ending"
   else if state.phase == "battle" then "battle"
@@ -4504,6 +4597,7 @@ def viewByPhase(state) :=
   | "llm_chat"  => viewLlmChat(state)
   | "ai_resolve"=> viewAiResolve(state)
   | "gallery"   => viewGallery(state)
+  | "sbSetup"   => viewSbSetup(state)
   | "sandbox"   => viewSandbox(state)
   | _ => viewTitle(state)
 

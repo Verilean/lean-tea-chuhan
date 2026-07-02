@@ -642,6 +642,124 @@ function render() {
   wireChatHandlers();
   wireResolveHandlers();
   wireGmHandlers();
+  wireSandboxSim();
+}
+
+// ─── Sandbox "わさわさ" agent sim (Canvas 2D). Little figures mill
+// about the camp; the crowd's faction colours track the world's
+// territory (flip a region and the mix visibly shifts). Purely
+// ephemeral animation state — never touches the pure `state`. ───────
+let sbSim = { agents: [], raf: null, w: 520, h: 150 };
+const SB_FCOL = { han: '#3b82f6', chu: '#ef4444', qin: '#9ca3af', lords: '#22c55e' };
+const SB_NOTABLE = { han: '韓信', chu: '項羽', qin: '子嬰', lords: '諸侯' };
+
+function sbTargetCounts() {
+  const w = state.world; const c = { han:0, chu:0, qin:0, lords:0 };
+  if (!w) return c;
+  for (const r of w.regions) c[r.owner] = (c[r.owner]||0) + 3;  // ~3 figures / region
+  return c;
+}
+function sbSpawn(faction) {
+  return {
+    x: Math.random() * sbSim.w,
+    y: 70 + Math.random() * 60,           // ground band (with depth)
+    dir: Math.random() < 0.5 ? -1 : 1,
+    sp: 0.2 + Math.random() * 0.5,
+    ph: Math.random() * 6.28,
+    faction: faction,
+    notable: false
+  };
+}
+function sbRebalance() {
+  const target = sbTargetCounts();
+  const have = { han:0, chu:0, qin:0, lords:0 };
+  for (const a of sbSim.agents) if (!a.notable) have[a.faction]++;
+  for (const f of ['han','chu','qin','lords']) {
+    while (have[f] < (target[f]||0)) { sbSim.agents.push(sbSpawn(f)); have[f]++; }
+    // trim excess of this faction
+    if (have[f] > (target[f]||0)) {
+      let over = have[f] - target[f];
+      sbSim.agents = sbSim.agents.filter(a => {
+        if (over > 0 && !a.notable && a.faction === f) { over--; return false; }
+        return true;
+      });
+    }
+  }
+}
+function sbSeed() {
+  sbSim.agents = [];
+  sbRebalance();
+  // A named notable per faction that actually holds ground.
+  const t = sbTargetCounts();
+  for (const f of ['han','chu','qin','lords']) {
+    if ((t[f]||0) > 0) {
+      const a = sbSpawn(f); a.notable = true; a.label = SB_NOTABLE[f]; a.sp *= 0.6;
+      sbSim.agents.push(a);
+    }
+  }
+}
+function sbDrawFigure(ctx, a) {
+  const bob = Math.sin(a.ph) * 1.5;
+  const scale = 0.6 + (a.y - 70) / 80 * 0.7;   // nearer (lower) = bigger
+  const x = a.x, y = a.y + bob;
+  ctx.strokeStyle = SB_FCOL[a.faction] || '#aaa';
+  ctx.fillStyle = SB_FCOL[a.faction] || '#aaa';
+  ctx.lineWidth = 1.4 * scale;
+  const h = 9 * scale;
+  // legs (walk cycle)
+  const stride = Math.sin(a.ph * 2) * 2 * scale;
+  ctx.beginPath();
+  ctx.moveTo(x, y); ctx.lineTo(x - stride, y + h * 0.5);
+  ctx.moveTo(x, y); ctx.lineTo(x + stride, y + h * 0.5);
+  // body
+  ctx.moveTo(x, y); ctx.lineTo(x, y - h);
+  ctx.stroke();
+  // head
+  ctx.beginPath();
+  ctx.arc(x, y - h - 1.6 * scale, 1.8 * scale, 0, 6.29);
+  ctx.fill();
+  if (a.notable && a.label) {
+    ctx.fillStyle = '#f0e6d2';
+    ctx.font = (6 * scale + 3) + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(a.label, x, y - h - 6 * scale);
+  }
+}
+function wireSandboxSim() {
+  if (state.phase !== 'sandbox') {
+    if (sbSim.raf !== null) { cancelAnimationFrame(sbSim.raf); sbSim.raf = null; }
+    sbSim.agents = [];
+    return;
+  }
+  const c = document.getElementById('sbStage');
+  if (!c) return;
+  if (sbSim.agents.length === 0) sbSeed();
+  if (sbSim.raf !== null) return;   // loop already running
+  const ctx = c.getContext('2d');
+  let frames = 0;
+  function frame() {
+    if (state.phase !== 'sandbox' || !document.getElementById('sbStage')) {
+      sbSim.raf = null; return;
+    }
+    frames++;
+    if (frames % 90 === 0) sbRebalance();   // track territory ~1.5s
+    ctx.clearRect(0, 0, c.width, c.height);
+    // ground line
+    ctx.strokeStyle = '#2a2318'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, 68); ctx.lineTo(c.width, 68); ctx.stroke();
+    // sort by y so nearer figures draw on top
+    const drawn = sbSim.agents.slice().sort((p, q) => p.y - q.y);
+    for (const a of sbSim.agents) {
+      a.ph += 0.12;
+      a.x += a.dir * a.sp;
+      if (a.x < 6) { a.x = 6; a.dir = 1; }
+      if (a.x > c.width - 6) { a.x = c.width - 6; a.dir = -1; }
+      if (Math.random() < 0.006) a.dir *= -1;      // random turn
+    }
+    for (const a of drawn) sbDrawFigure(ctx, a);
+    sbSim.raf = requestAnimationFrame(frame);
+  }
+  sbSim.raf = requestAnimationFrame(frame);
 }
 
 // ─── Sandbox game master: free-text action → /api/gm → world deltas.
