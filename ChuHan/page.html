@@ -643,6 +643,143 @@ function render() {
   wireResolveHandlers();
   wireGmHandlers();
   wireSandboxSim();
+  wireAtmo();
+}
+
+// ─── P3.5 · Atmosphere sky-band. A WGSL fragment shader (WebGPU) tints
+// the sandbox with the current mood — dusk / fire / sandstorm / snow —
+// derived from the season and the latest event. Falls back to a
+// Canvas-2D painter when WebGPU is unavailable (Safari / older), so the
+// band is always alive. Mode: 0 dusk · 1 fire · 2 sandstorm · 3 snow.
+const ATMO_WGSL = `
+struct U { time:f32, mode:f32, resx:f32, resy:f32 };
+@group(0) @binding(0) var<uniform> u:U;
+@vertex fn vs(@builtin(vertex_index) i:u32) -> @builtin(position) vec4f {
+  var p = array<vec2f,3>(vec2f(-1.,-1.), vec2f(3.,-1.), vec2f(-1.,3.));
+  return vec4f(p[i], 0., 1.);
+}
+fn hash(p:vec2f)->f32 { return fract(sin(dot(p, vec2f(41.3,289.1)))*43758.5453); }
+@fragment fn fs(@builtin(position) fc:vec4f) -> @location(0) vec4f {
+  let uv = fc.xy / vec2f(u.resx, u.resy);
+  let t = u.time;
+  var col = vec3f(0.09,0.08,0.06);
+  if (u.mode < 0.5) {
+    col = mix(vec3f(0.16,0.10,0.08), vec3f(0.05,0.05,0.09), uv.y);
+    let e = smoothstep(0.75,1.0, hash(floor(vec2f(uv.x*44., uv.y*18. - t*0.5))));
+    col += vec3f(0.5,0.3,0.1)*e*0.35;
+  } else if (u.mode < 1.5) {
+    let n = hash(floor(vec2f(uv.x*34., uv.y*30. - t*3.5)));
+    let flame = smoothstep(0.15,1.0, n) * (1.0-uv.y);
+    col = mix(vec3f(0.22,0.03,0.0), vec3f(1.0,0.55,0.12), flame);
+    col += vec3f(1.0,0.6,0.2)*pow(1.0-uv.y,3.0)*0.55;
+  } else if (u.mode < 2.5) {
+    let s = hash(floor(vec2f(uv.x*7. - t*5., uv.y*36.)));
+    col = mix(vec3f(0.36,0.27,0.16), vec3f(0.52,0.42,0.26), s*0.6);
+    col = mix(col, vec3f(0.27,0.21,0.13), uv.y);
+  } else {
+    col = mix(vec3f(0.17,0.19,0.24), vec3f(0.07,0.08,0.12), uv.y);
+    let f = hash(floor(vec2f(uv.x*52., uv.y*26. + t*2.2)));
+    col += vec3f(0.9,0.95,1.0)*smoothstep(0.95,1.0,f)*0.85;
+  }
+  return vec4f(col, 1.0);
+}`;
+
+let atmo = { state: 'idle', render: null, raf: null, tried: false };
+
+function sbAtmoMode() {
+  const w = state.world; if (!w) return 0;
+  const last = (w.log && w.log.length) ? w.log[w.log.length - 1] : '';
+  if (/炎|焼|燃/.test(last)) return 1;
+  if (/急襲|砂|嵐/.test(last)) return 2;
+  if (w.season === 3 || /雪|飢饉/.test(last)) return 3;
+  return 0;
+}
+
+// Canvas-2D fallback painter (always available).
+function atmo2D(canvas) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const parts = Array.from({length: 60}, () => ({
+    x: Math.random()*W, y: Math.random()*H, s: Math.random()*2+0.5, v: Math.random()*0.5+0.2
+  }));
+  return (t) => {
+    const m = sbAtmoMode();
+    const g = ctx.createLinearGradient(0,0,0,H);
+    if (m===1){ g.addColorStop(0,'#3a0d02'); g.addColorStop(1,'#c65214'); }
+    else if (m===2){ g.addColorStop(0,'#5a4527'); g.addColorStop(1,'#3f3018'); }
+    else if (m===3){ g.addColorStop(0,'#2a2f3a'); g.addColorStop(1,'#141820'); }
+    else { g.addColorStop(0,'#241610'); g.addColorStop(1,'#0d0d16'); }
+    ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = m===3 ? 'rgba(230,240,255,0.9)' : (m===1 ? 'rgba(255,180,90,0.8)' : 'rgba(200,180,140,0.5)');
+    for (const p of parts) {
+      if (m===1) { p.y -= p.v*2; if (p.y<0){ p.y=H; p.x=Math.random()*W; } }
+      else if (m===2) { p.x -= p.v*3; if (p.x<0){ p.x=W; p.y=Math.random()*H; } }
+      else { p.y += p.v; if (p.y>H){ p.y=0; p.x=Math.random()*W; } }
+      ctx.fillRect(p.x, p.y, p.s, p.s);
+    }
+  };
+}
+
+async function atmoWebGPU(canvas) {
+  if (!navigator.gpu) return null;
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) return null;
+  const device = await adapter.requestDevice();
+  const ctx = canvas.getContext('webgpu');
+  if (!ctx) return null;
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({ device, format, alphaMode: 'opaque' });
+  device.pushErrorScope('validation');
+  const mod = device.createShaderModule({ code: ATMO_WGSL });
+  const pipe = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: mod, entryPoint: 'vs' },
+    fragment: { module: mod, entryPoint: 'fs', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' }
+  });
+  const err = await device.popErrorScope();
+  if (err) return null;   // WGSL/pipeline invalid → caller uses 2D
+  const ubuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const bind = device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubuf } }] });
+  return (t) => {
+    device.queue.writeBuffer(ubuf, 0, new Float32Array([t, sbAtmoMode(), canvas.width, canvas.height]));
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), clearValue: {r:0,g:0,b:0,a:1}, loadOp: 'clear', storeOp: 'store' }] });
+    pass.setPipeline(pipe); pass.draw(3); pass.end();
+    device.queue.submit([enc.finish()]);
+  };
+}
+
+function atmoStartLoop() {
+  const t0 = performance.now();
+  const frame = () => {
+    const c = document.getElementById('sbAtmo');
+    if (state.phase !== 'sandbox' || !c || !atmo.render) { atmo.raf = null; atmo.state = 'idle'; return; }
+    atmo.render((performance.now() - t0) / 1000);
+    atmo.raf = requestAnimationFrame(frame);
+  };
+  atmo.raf = requestAnimationFrame(frame);
+}
+
+function wireAtmo() {
+  const c = document.getElementById('sbAtmo');
+  if (state.phase !== 'sandbox' || !c) {
+    if (atmo.raf) { cancelAnimationFrame(atmo.raf); atmo.raf = null; }
+    atmo.state = 'idle';
+    return;
+  }
+  if (atmo.state === 'running' && atmo.raf) return;
+  if (atmo.state === 'starting') return;
+  atmo.state = 'starting';
+  const begin2D = () => { atmo.render = atmo2D(c); atmo.state = 'running'; atmoStartLoop(); };
+  if (atmo.tried && !navigator.gpu) { begin2D(); return; }
+  atmo.tried = true;
+  (async () => {
+    let r = null;
+    try { r = await atmoWebGPU(c); } catch (e) { r = null; }
+    if (r) { atmo.render = r; atmo.state = 'running'; atmoStartLoop(); }
+    else begin2D();
+  })();
 }
 
 // ─── Sandbox "わさわさ" agent sim (Canvas 2D). Little figures mill
