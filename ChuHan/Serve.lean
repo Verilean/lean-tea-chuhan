@@ -183,6 +183,13 @@ def auditAssets (gameSrc : String) (pageSrc : String) (assetDir : String)
 
 abbrev GameProvider := IO (String × Bool)
 
+/-- Resolve the ChuHan content directory for both the standalone repo
+    layout (`ChuHan/`) and the lean-elm monorepo layout
+    (`examples/ChuHan/`). -/
+def chuhanDir : IO String := do
+  if ← System.FilePath.pathExists "ChuHan/page.html" then return "ChuHan"
+  else return "examples/ChuHan"
+
 def mkGameProvider (devMode : Bool) : IO GameProvider := do
   if devMode then
     let _ ← compileGame
@@ -446,7 +453,11 @@ def handler (cfg : LeanTea.Llm.Openai.Config)
       let bad := rel.contains '.' && (rel.splitOn "..").length > 1
       if bad || rel.contains '/' then return Response.notFound
       else
-        let full := "examples/ChuHan/assets/" ++ rel
+        -- Resolve assets under either the standalone (`ChuHan/`) or the
+        -- monorepo (`examples/ChuHan/`) layout.
+        let standalone := "ChuHan/assets/" ++ rel
+        let full := if (← System.FilePath.pathExists standalone) then standalone
+                    else "examples/ChuHan/assets/" ++ rel
         if ← System.FilePath.pathExists full then
           let bytes ← IO.FS.readBinFile full
           let mime :=
@@ -495,16 +506,17 @@ def serveMain (args : List String) : IO Unit := do
   let cfg : LeanTea.Llm.Openai.Config := {
     baseUrl, apiKey? := none, timeoutSec := some 60
   }
-  let pageProv ← Template.mkProvider "examples/ChuHan/page.html" a.dev
+  let base ← chuhanDir
+  let pageProv ← Template.mkProvider (base ++ "/page.html") a.dev
   let gameProv ← mkGameProvider a.dev
   let modeNote := if a.dev then "  [DEV: hot reload]" else ""
   IO.println s!"chuhan server: http://{a.host}:{a.port}/{modeNote}"
   IO.println s!"  LLM backend: {baseUrl}"
   /- Asset audit: anything missing is loud (stderr + manifest file). -/
   let gameSrc ← ChuHan.loadSource
-  let pageSrc ← IO.FS.readFile "examples/ChuHan/page.html"
-  auditAssets gameSrc pageSrc "examples/ChuHan/assets"
-              "examples/ChuHan/MISSING_ASSETS.txt"
+  let pageSrc ← IO.FS.readFile (base ++ "/page.html")
+  auditAssets gameSrc pageSrc (base ++ "/assets")
+              (base ++ "/MISSING_ASSETS.txt")
   /- Use `serveConcurrent` because /api/ask can block on the LLM for
      several seconds; while it's blocked the user may still navigate
      the static page or fire another tab. -/

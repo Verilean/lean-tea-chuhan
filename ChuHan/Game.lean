@@ -8,6 +8,10 @@ lives in `Game.leanjs` next door. -/
 namespace ChuHan
 
 private def candidates : List String := [
+  -- Standalone repo layout (this repo): files live under `ChuHan/`.
+  "ChuHan/Game.leanjs",
+  "../ChuHan/Game.leanjs",
+  -- Monorepo layout (lean-elm/examples): kept for in-tree builds.
   "examples/ChuHan/Game.leanjs",
   "../examples/ChuHan/Game.leanjs",
   "../../examples/ChuHan/Game.leanjs",
