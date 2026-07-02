@@ -641,6 +641,53 @@ function render() {
   maybeStartRingLoop();
   wireChatHandlers();
   wireResolveHandlers();
+  wireGmHandlers();
+}
+
+// ─── Sandbox game master: free-text action → /api/gm → world deltas.
+// Falls back to the local event table (via 'gmError') when the LLM is
+// unreachable, so the sandbox stays playable fully offline. ─────────
+function wireGmHandlers() {
+  const send = document.getElementById('gmSend');
+  const input = document.getElementById('gmInput');
+  if (!send || !input) return;
+  if (send.dataset.wired) return;
+  send.dataset.wired = '1';
+  const snapshot = () => {
+    const w = state.world;
+    if (!w) return '';
+    return w.regions.map(r => r.id + '(' + r.ja + '):' + r.owner + ' ' + r.ctrl + '%').join(', ')
+      + ' / BCE ' + w.year + ' ' + '春夏秋冬'[w.season];
+  };
+  const doSend = async () => {
+    const text = input.value.trim();
+    if (!text || (state.world && state.world.pending === 1)) return;
+    input.value = '';
+    state = update({tag: 'gmSubmit', text: text}, state);
+    persist(state); render();
+    try {
+      const res = await fetch('/api/gm', {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({action: text, world: snapshot()})
+      });
+      const j = await res.json();
+      if (j.error) {
+        state = update({tag: 'gmError', text: ''}, state);
+      } else {
+        state = update({tag: 'gmResult',
+                        narration: j.narration || '（天は沈黙している）',
+                        deltas: j.deltas || []}, state);
+      }
+    } catch (e) {
+      state = update({tag: 'gmError', text: ''}, state);
+    }
+    persist(state); render();
+  };
+  send.addEventListener('click', doSend);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+  });
 }
 
 // ─── LLM chat wiring: send button + Enter, scroll, focus ──────────

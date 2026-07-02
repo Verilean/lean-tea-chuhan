@@ -3058,16 +3058,24 @@ def update(msg, state) :=
                        char: "", sceneId: "", beat: 0,
                        stats: state.stats, flags: state.flags,
                        battle: state.battle, endingId: "", toast: "" , mini: state.mini, llm: state.llm, resolve: state.resolve}
-  | "enterSandbox" => { phase: "sandbox", lang: state.lang,
-                       char: "liubang", sceneId: "", beat: 0,
-                       stats: state.stats, flags: state.flags,
-                       battle: state.battle, endingId: "", toast: "" , mini: state.mini, llm: state.llm, resolve: state.resolve,
-                       world: initWorld("sandbox")}
-  | "sbAdvance" => { phase: "sandbox", lang: state.lang,
-                       char: state.char, sceneId: "", beat: 0,
-                       stats: state.stats, flags: state.flags,
-                       battle: state.battle, endingId: "", toast: "" , mini: state.mini, llm: state.llm, resolve: state.resolve,
-                       world: sbTick(state.world)}
+  | "enterSandbox" => sbStateWith(state, initWorld("sandbox"))
+  | "sbAdvance" => sbStateWith(state, sbTick(state.world))
+  | "gmSubmit" => (
+    let w := state.world;
+    sbStateWith(state,
+      sbWorld(w.mode, w.year, w.season, w.loc, w.regions,
+        arrPush(w.log, sconcat("▶ 劉邦: ", msg.text)), 1)))
+  | "gmResult" => (
+    let w := state.world;
+    let regions2 := sbApplyDeltas(w.regions, msg.deltas, 0);
+    sbStateWith(state,
+      sbWorld(w.mode, sbNextYear(w.year, w.season), sbNextSeason(w.season),
+        w.loc, regions2, arrPush(w.log, msg.narration), 0)))
+  | "gmError" => (
+    let w2 := sbTick(state.world);
+    sbStateWith(state,
+      sbWorld(w2.mode, w2.year, w2.season, w2.loc, w2.regions,
+        arrPush(w2.log, sconcat("（AI 不通ゆえ天下は独りでに動いた）", msg.text)), 0)))
   | "toTitle" => { phase: "title", lang: state.lang,
                        char: "", sceneId: "", beat: 0,
                        stats: state.stats, flags: state.flags,
@@ -4300,13 +4308,35 @@ def sbCount(regions, owner, i, acc) :=
       acc + (if arrGet(regions, i).owner == owner then 1 else 0))
   else acc
 
-def initWorld(mode) := {
-  mode: mode,
-  year: 206,
-  season: 0,
-  loc: "hanzhong",
-  regions: sbRegions,
-  log: ["漢中。あなたは劉邦。天下はまだ、誰のものでもない。季を進めるたび、世は勝手に転がり出す。"]
+def sbWorld(mode, year, season, loc, regions, log, pending) :=
+  {mode: mode, year: year, season: season, loc: loc,
+   regions: regions, log: log, pending: pending}
+
+def initWorld(mode) :=
+  sbWorld(mode, 206, 0, "hanzhong", sbRegions,
+    ["漢中。あなたは劉邦。天下はまだ、誰のものでもない。行動を書けば AI の軍師が即興で世を動かし、書かねば季だけが流れていく。"],
+    0)
+
+-- 次の季へ日付を進める(BCE は減算)。{year, season} を返す。
+def sbNextYear(year, season) := if season + 1 > 3 then year - 1 else year
+def sbNextSeason(season) := if season + 1 > 3 then 0 else season + 1
+
+-- LLM が返した deltas を盤面に適用。owner があれば領有変更、無ければ支配率増減。
+def sbApplyDeltas(regions, deltas, i) :=
+  if i < arrLen(deltas) then
+    (let d := arrGet(deltas, i);
+     let ri := sbIdxOf(regions, d.region, 0);
+     let regions2 := if d.owner then sbOwn(regions, ri, d.owner)
+                     else sbAdj(regions, ri, (if d.dCtrl then d.dCtrl else 0));
+     sbApplyDeltas(regions2, deltas, i + 1))
+  else regions
+
+-- サンドボックス用の完全な state を組み立てる(既存フィールドを保つ)。
+def sbStateWith(state, world) := {
+  phase: "sandbox", lang: state.lang, char: "liubang",
+  sceneId: "", beat: 0, stats: state.stats, flags: state.flags,
+  battle: state.battle, endingId: "", toast: "",
+  mini: state.mini, llm: state.llm, resolve: state.resolve, world: world
 }
 
 -- 一手ぶんの創発イベント。{regions, line} を返す。笑い/葛藤/驚きを混ぜる。
@@ -4355,11 +4385,9 @@ def sbEvent(world) :=
 
 def sbTick(world) :=
   let e := sbEvent(world);
-  let s := world.season + 1;
-  let ny := if s > 3 then world.year - 1 else world.year;
-  let ns := if s > 3 then 0 else s;
-  {mode: world.mode, year: ny, season: ns, loc: world.loc,
-   regions: e.regions, log: arrPush(world.log, e.line)}
+  sbWorld(world.mode, sbNextYear(world.year, world.season),
+    sbNextSeason(world.season), world.loc,
+    e.regions, arrPush(world.log, e.line), 0)
 
 -- ── マップ描画(SVG 文字列)──────────────────────────────────────
 def sbRad(ctrl) := if ctrl > 70 then 7 else if ctrl > 40 then 5 else 4
@@ -4424,6 +4452,9 @@ def viewSandbox(state) :=
     "</svg>"
   ]);
   let date := sjoin(["BCE ", numStr(w.year), " ・ ", sbSeason(w.season)]);
+  let pend := if w.pending == 1
+    then "<div style='color:#ffd54a;margin:8px 0'>……軍師が知恵を絞っている</div>"
+    else "";
   sjoin([
     "<div style='max-width:560px;margin:0 auto;padding:16px'>",
     "<div style='display:flex;justify-content:space-between;align-items:baseline'>",
@@ -4432,10 +4463,15 @@ def viewSandbox(state) :=
     map,
     sbFactionBar(w.regions),
     panel("mini", "動静", sbLog(w.log)),
-    "<div style='display:flex;gap:10px;margin-top:12px'>",
-    button("primary", {tag: "sbAdvance"}, "季を進める ▶"),
+    pend,
+    "<div style='margin-top:12px'>",
+    "<input id='gmInput' placeholder='劉邦として何をする? 例: 韓信を大将軍に任じ關中を突く' ",
+    "style='width:100%;padding:9px;background:#0f0d0a;border:1px solid #4a3f2f;color:#eee;border-radius:6px;box-sizing:border-box'/>",
+    "<div style='display:flex;gap:8px;margin-top:8px;flex-wrap:wrap'>",
+    "<button id='gmSend' class='btn btn-primary'>行動する（AI 軍師）</button>",
+    button("primary", {tag: "sbAdvance"}, "季を進める（静観）▶"),
     button("ghost", {tag: "toTitle"}, "タイトルへ"),
-    "</div></div>"
+    "</div></div></div>"
   ])
 
 -- BGM for the current state — phase has priority over scene bg.

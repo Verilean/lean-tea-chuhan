@@ -420,6 +420,72 @@ private def handleResolve (cfg : LeanTea.Llm.Openai.Config) (req : Request) : IO
       let body := Json.mkObj [("error", Json.str s!"llm: {e}")]
       return Response.text 500 body.compress
 
+/-! ## /api/gm — sandbox game master
+
+The emergent-sandbox counterpart of `/api/resolve`. Body is
+`{action, world}` where `action` is the player's free-text move and
+`world` is a compact text snapshot of the board. The model improvises
+the outcome and returns `{narration, deltas}`, where each delta shifts
+a region's control (`dCtrl`) or its owner. Malformed output degrades
+to "narration only, no board change" so the player is never stuck; and
+the client falls back to the local event table when the LLM is
+unreachable, keeping the sandbox playable fully offline. -/
+
+private def gmSystemPrompt : String :=
+  "あなたは紀元前206年、楚漢戦争サンドボックスのゲームマスターです。\
+プレイヤー(劉邦)の自由な行動を読み、世界の反応を即興で描き、盤面の変化を返します。\
+史実に縛られず、しかし人物の性格(項羽=誇り高い武人、韓信=野心家、呂雉=冷徹、范増=老獪、\
+子嬰=秦の亡命者)と勢力の力関係に照らして、笑い・葛藤・驚きのある結果にしてください。\
+無謀には手痛いしっぺ返しを、巧みには利を。乱世ゆえ、時に予想外のどんでん返しも。\
+\n\n地域ID: guanzhong(關中) xianyang(咸陽) hanzhong(漢中) bashu(巴蜀) \
+pengcheng(彭城) wei(魏) zhao(趙) qi(齊)\
+\n勢力ID: han(漢) chu(楚) qin(秦) lords(諸侯)\
+\n\n返答は必ず次の JSON 1 行のみ。前後にコードブロックも文章も付けないこと:\
+\n{\"narration\":\"結果の描写(日本語 60-160字)\",\"deltas\":[{\"region\":\"地域ID\",\"dCtrl\":整数(-25〜25),\"owner\":\"勢力ID(領有が変わる時だけ)\"}]}\
+\n\ndCtrl は支配率の増減。owner は領有勢力が変わる時だけ入れる。deltas は 0〜3 個。"
+
+private def handleGm (cfg : LeanTea.Llm.Openai.Config) (req : Request) : IO Response := do
+  match Json.parse (String.fromUTF8! req.body) with
+  | .error e =>
+    return Response.text 400 (Json.mkObj [("error", Json.str s!"bad json: {e}")]).compress
+  | .ok j =>
+    let action := jstrField j "action"
+    let world  := jstrField j "world"
+    if action.isEmpty then
+      return Response.text 400 (Json.mkObj [("error", Json.str "empty action")]).compress
+    let userText := s!"【現在の盤面】\n{world}\n\n【劉邦の行動】\n{action}"
+    let systemMsg : LeanTea.Llm.Openai.Message := { role := "system", content := .inl gmSystemPrompt }
+    let userMsg : LeanTea.Llm.Openai.Message := { role := "user", content := .inl userText }
+    let model ← do
+      match ← IO.getEnv "LMSTUDIO_MODEL" with
+      | some m => pure m
+      | none   => pure "local-model"
+    let chatReq : LeanTea.Llm.Openai.ChatRequest := {
+      model, messages := [systemMsg, userMsg],
+      temperature := some 0.9, maxTokens := some 400
+    }
+    try
+      let res ← LeanTea.Llm.Openai.chat cfg chatReq
+      let raw := stripJsonCodeFence res.content
+      match Json.parse raw with
+      | .ok j2 =>
+        let narration := jstrField j2 "narration"
+        let deltas := (j2.getObjVal? "deltas").toOption.bind (·.getArr?.toOption) |>.getD #[]
+        let body := Json.mkObj [
+          ("narration", Json.str (if narration.isEmpty then raw else narration)),
+          ("deltas", Json.arr deltas)
+        ]
+        return Response.text 200 body.compress
+      | .error _ =>
+        -- Unparseable → narration only, no board change (safe).
+        let body := Json.mkObj [
+          ("narration", Json.str raw), ("deltas", Json.arr #[])
+        ]
+        return Response.text 200 body.compress
+    catch e =>
+      let body := Json.mkObj [("error", Json.str s!"llm: {e}")]
+      return Response.text 500 body.compress
+
 /-! ## Handler -/
 
 def handler (cfg : LeanTea.Llm.Openai.Config)
@@ -442,6 +508,7 @@ def handler (cfg : LeanTea.Llm.Openai.Config)
     return Response.text 200 gameJs
   | "/api/ask", "POST" => handleAsk cfg req
   | "/api/resolve", "POST" => handleResolve cfg req
+  | "/api/gm", "POST" => handleGm cfg req
   | "/favicon.ico", _ =>
     return { status := 204, headers := #[], body := .empty }
   | path, _ =>
