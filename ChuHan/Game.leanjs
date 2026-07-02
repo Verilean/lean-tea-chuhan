@@ -3058,6 +3058,20 @@ def update(msg, state) :=
                        char: "", sceneId: "", beat: 0,
                        stats: state.stats, flags: state.flags,
                        battle: state.battle, endingId: "", toast: "" , mini: state.mini, llm: state.llm, resolve: state.resolve}
+  | "enterSandbox" => { phase: "sandbox", lang: state.lang,
+                       char: "liubang", sceneId: "", beat: 0,
+                       stats: state.stats, flags: state.flags,
+                       battle: state.battle, endingId: "", toast: "" , mini: state.mini, llm: state.llm, resolve: state.resolve,
+                       world: initWorld("sandbox")}
+  | "sbAdvance" => { phase: "sandbox", lang: state.lang,
+                       char: state.char, sceneId: "", beat: 0,
+                       stats: state.stats, flags: state.flags,
+                       battle: state.battle, endingId: "", toast: "" , mini: state.mini, llm: state.llm, resolve: state.resolve,
+                       world: sbTick(state.world)}
+  | "toTitle" => { phase: "title", lang: state.lang,
+                       char: "", sceneId: "", beat: 0,
+                       stats: state.stats, flags: state.flags,
+                       battle: state.battle, endingId: "", toast: "" , mini: state.mini, llm: state.llm, resolve: state.resolve}
   | "pickChar" => (
     let cid := msg.id;
     let sid := startSceneFor(cid);
@@ -3709,6 +3723,7 @@ def viewTitle(state) :=
   sjoin([
     "<div class='title-bg'><h1>楚漢恋歌</h1><div class='sub'>CHU·HAN LOVE SONG</div>",
     button("primary", {tag: "startSelect"}, "START"),
+    button("primary", {tag: "enterSandbox"}, "群雄サンドボックス β"),
     button("primary", {tag: "openGallery"}, "END ギャラリー"),
     "<div class='sub' style='font-size:11px;color:#666;margin-top:60px'>",
     "六つの生、六つの死、六つの恋。<br>BCE 209 ─ 195. Six lives. Six loves. Six deaths.<br><br>",
@@ -4221,10 +4236,213 @@ def bgmForBg(bg) :=
   else if bg == "bg-pengcheng" then "grief"
   else "village"
 
+-- ════════════════════════════════════════════════════════════════════
+--  P1 · 群雄サンドボックス (劉邦) — static-first, LLM 不要の創発ループ
+--  固定シーングラフの外側。世界状態 + 支配地域マップ + ローカルな
+--  イベント表で「先が読めない」を LLM 無しでも回す。史実モードは
+--  mode="hist" のイベント重みで後段拡張(P4)。
+-- ════════════════════════════════════════════════════════════════════
+
+extern js "(n) => String(n)" numStr
+
+-- 楚漢の主要地域。x/y は 0..100 のマップ座標。
+def sbRegions := [
+  {id: "guanzhong", ja: "關中", x: 34, y: 42, owner: "qin",   ctrl: 60},
+  {id: "xianyang",  ja: "咸陽", x: 40, y: 36, owner: "qin",   ctrl: 50},
+  {id: "hanzhong",  ja: "漢中", x: 30, y: 56, owner: "han",   ctrl: 82},
+  {id: "bashu",     ja: "巴蜀", x: 20, y: 70, owner: "han",   ctrl: 55},
+  {id: "pengcheng", ja: "彭城", x: 66, y: 48, owner: "chu",   ctrl: 85},
+  {id: "wei",       ja: "魏",   x: 54, y: 42, owner: "lords", ctrl: 50},
+  {id: "zhao",      ja: "趙",   x: 60, y: 26, owner: "lords", ctrl: 55},
+  {id: "qi",        ja: "齊",   x: 80, y: 34, owner: "lords", ctrl: 60}
+]
+
+def sbColor(owner) :=
+  if owner == "han" then "#3b82f6"
+  else if owner == "chu" then "#ef4444"
+  else if owner == "qin" then "#9ca3af"
+  else if owner == "lords" then "#22c55e"
+  else "#666"
+
+def sbName(owner) :=
+  if owner == "han" then "漢"
+  else if owner == "chu" then "楚"
+  else if owner == "qin" then "秦"
+  else if owner == "lords" then "諸侯"
+  else "中立"
+
+def sbSeason(s) :=
+  if s == 0 then "春" else if s == 1 then "夏"
+  else if s == 2 then "秋" else "冬"
+
+def sbClamp(v) := if v < 0 then 0 else if v > 100 then 100 else v
+
+def sbIdxOf(regions, id, i) :=
+  if i < arrLen(regions) then
+    (if arrGet(regions, i).id == id then i else sbIdxOf(regions, id, i + 1))
+  else 0
+
+-- 支配率を index i で d だけ増減した新 regions を返す。
+def sbAdj(regions, i, d) :=
+  let r := arrGet(regions, i);
+  arrSet(regions, i,
+    {id: r.id, ja: r.ja, x: r.x, y: r.y, owner: r.owner, ctrl: sbClamp(r.ctrl + d)})
+
+-- 領有勢力を owner に変え、支配率をリセット。
+def sbOwn(regions, i, owner) :=
+  let r := arrGet(regions, i);
+  arrSet(regions, i,
+    {id: r.id, ja: r.ja, x: r.x, y: r.y, owner: owner, ctrl: 52})
+
+def sbCount(regions, owner, i, acc) :=
+  if i < arrLen(regions) then
+    sbCount(regions, owner, i + 1,
+      acc + (if arrGet(regions, i).owner == owner then 1 else 0))
+  else acc
+
+def initWorld(mode) := {
+  mode: mode,
+  year: 206,
+  season: 0,
+  loc: "hanzhong",
+  regions: sbRegions,
+  log: ["漢中。あなたは劉邦。天下はまだ、誰のものでもない。季を進めるたび、世は勝手に転がり出す。"]
+}
+
+-- 一手ぶんの創発イベント。{regions, line} を返す。笑い/葛藤/驚きを混ぜる。
+def sbEvent(world) :=
+  let regions := world.regions;
+  let n := arrLen(regions);
+  let ev := rngInt() % 9;
+  let ri := rngInt() % n;
+  let r := arrGet(regions, ri);
+  if ev == 0 then
+    {regions: sbAdj(regions, ri, 12),
+     line: sconcat("韓信、密かに陳倉を渡る。", sconcat(r.ja, "の漢軍が勢いづいた。"))}
+  else if ev == 1 then
+    (if r.owner == "han"
+     then {regions: sbAdj(regions, ri, -15),
+           line: sconcat("項羽の急襲。", sconcat(r.ja, "の漢の支配が揺らぐ。"))}
+     else {regions: sbAdj(regions, ri, -6),
+           line: sconcat("楚の鉄騎が", sconcat(r.ja, "を圧した。"))})
+  else if ev == 2 then
+    {regions: sbAdj(regions, sbIdxOf(regions, "guanzhong", 0), 11),
+     line: "關中で秦の残党が旗を上げた。……復興の火種か、ただの残り火か。"}
+  else if ev == 3 then
+    (if r.owner == "lords"
+     then {regions: sbOwn(regions, ri, (if rngInt() % 2 == 0 then "han" else "chu")),
+           line: sconcat(r.ja, "の諸侯が寝返った。旗色を読むのが乱世の作法だ。")}
+     else {regions: regions,
+           line: sconcat(r.ja, "の諸侯は日和見を決め込み、酒を送ってきた。")})
+  else if ev == 4 then
+    {regions: regions,
+     line: "劉邦、酒と美姫に半日を溶かす。……天下は、特に何も起きなかった。"}
+  else if ev == 5 then
+    {regions: sbAdj(regions, ri, -10),
+     line: sconcat("飢饉。", sconcat(r.ja, "の民が細り、流れていく。"))}
+  else if ev == 6 then
+    (if r.owner == "han"
+     then {regions: sbAdj(regions, ri, 8),
+           line: sconcat("名もなき一兵卒が", sconcat(r.ja, "で武功を立てた。誰も、その名を知らぬ。"))}
+     else {regions: regions,
+           line: "斥候が手ぶらで帰ってきた。腹だけ空かせて。"})
+  else if ev == 7 then
+    {regions: regions,
+     line: "呂雉より書簡。「留守は、私が守ります」――その端正な筆致に、なぜか背が冷えた。"}
+  else
+    {regions: sbAdj(regions, ri, (if rngInt() % 2 == 0 then 5 else -5)),
+     line: sconcat("天下は", sconcat(r.ja, "を軸に、静かに一つ動いた。"))}
+
+def sbTick(world) :=
+  let e := sbEvent(world);
+  let s := world.season + 1;
+  let ny := if s > 3 then world.year - 1 else world.year;
+  let ns := if s > 3 then 0 else s;
+  {mode: world.mode, year: ny, season: ns, loc: world.loc,
+   regions: e.regions, log: arrPush(world.log, e.line)}
+
+-- ── マップ描画(SVG 文字列)──────────────────────────────────────
+def sbRad(ctrl) := if ctrl > 70 then 7 else if ctrl > 40 then 5 else 4
+
+def sbMapLoop(regions, i, acc) :=
+  if i < arrLen(regions) then
+    (let r := arrGet(regions, i);
+     let rad := sbRad(r.ctrl);
+     let node := sjoin([
+       "<circle cx='", numStr(r.x), "' cy='", numStr(r.y),
+       "' r='", numStr(rad), "' fill='", sbColor(r.owner),
+       "' fill-opacity='0.72' stroke='#0009' stroke-width='0.4'/>",
+       "<text x='", numStr(r.x), "' y='", numStr(r.y - rad - 1),
+       "' font-size='3.4' text-anchor='middle' fill='#f0e6d2'>", hesc(r.ja),
+       "</text>"
+     ]);
+     sbMapLoop(regions, i + 1, sconcat(acc, node)))
+  else acc
+
+def sbMarker(regions, loc) :=
+  let r := arrGet(regions, sbIdxOf(regions, loc, 0));
+  sjoin([
+    "<circle cx='", numStr(r.x), "' cy='", numStr(r.y),
+    "' r='2' fill='#ffd54a' stroke='#000' stroke-width='0.5'/>",
+    "<text x='", numStr(r.x), "' y='", numStr(r.y + 6),
+    "' font-size='3' text-anchor='middle' fill='#ffd54a'>あなた</text>"
+  ])
+
+def sbFacChip(owner, regions) :=
+  sjoin([
+    "<span style='padding:2px 9px;border:1px solid ", sbColor(owner),
+    ";border-radius:11px;font-size:13px;color:#eee'>",
+    hesc(sbName(owner)), " ", numStr(sbCount(regions, owner, 0, 0)), "地</span>"
+  ])
+
+def sbFactionBar(regions) :=
+  sjoin([
+    "<div style='display:flex;gap:8px;justify-content:center;margin:10px 0'>",
+    sbFacChip("han", regions), sbFacChip("chu", regions),
+    sbFacChip("qin", regions), sbFacChip("lords", regions),
+    "</div>"
+  ])
+
+-- ログを新しい順に最大6行。
+def sbLogFrom(log, i, stop, acc) :=
+  if i >= stop then
+    sbLogFrom(log, i - 1, stop,
+      sconcat(acc, sjoin(["<div style='padding:4px 0;border-bottom:1px solid #3a3226;font-size:13px;color:#d8cbb0'>", hesc(arrGet(log, i)), "</div>"])))
+  else acc
+
+def sbLog(log) :=
+  let n := arrLen(log);
+  let stop := if n > 6 then n - 6 else 0;
+  sbLogFrom(log, n - 1, stop, "")
+
+def viewSandbox(state) :=
+  let w := state.world;
+  let map := sjoin([
+    "<svg viewBox='0 0 100 92' style='width:100%;max-width:540px;height:auto;background:#17140f;border:1px solid #4a3f2f;border-radius:8px;display:block;margin:0 auto'>",
+    sbMapLoop(w.regions, 0, ""),
+    sbMarker(w.regions, w.loc),
+    "</svg>"
+  ]);
+  let date := sjoin(["BCE ", numStr(w.year), " ・ ", sbSeason(w.season)]);
+  sjoin([
+    "<div style='max-width:560px;margin:0 auto;padding:16px'>",
+    "<div style='display:flex;justify-content:space-between;align-items:baseline'>",
+    "<h2 style='margin:0'>群雄割拠 ― 劉邦 <span style='font-size:12px;color:#888'>β</span></h2>",
+    "<div style='color:#ffd54a;font-size:15px'>", hesc(date), "</div></div>",
+    map,
+    sbFactionBar(w.regions),
+    panel("mini", "動静", sbLog(w.log)),
+    "<div style='display:flex;gap:10px;margin-top:12px'>",
+    button("primary", {tag: "sbAdvance"}, "季を進める ▶"),
+    button("ghost", {tag: "toTitle"}, "タイトルへ"),
+    "</div></div>"
+  ])
+
 -- BGM for the current state — phase has priority over scene bg.
 def bgmForPhase(state) :=
   if state.phase == "title" then "title"
   else if state.phase == "select" then "title"
+  else if state.phase == "sandbox" then "court"
   else if state.phase == "gallery" then "title"
   else if state.phase == "ending" then "ending"
   else if state.phase == "battle" then "battle"
@@ -4250,6 +4468,7 @@ def viewByPhase(state) :=
   | "llm_chat"  => viewLlmChat(state)
   | "ai_resolve"=> viewAiResolve(state)
   | "gallery"   => viewGallery(state)
+  | "sandbox"   => viewSandbox(state)
   | _ => viewTitle(state)
 
 def view(state) :=
