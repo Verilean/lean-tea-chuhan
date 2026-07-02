@@ -26,7 +26,7 @@ package «lean-tea-chuhan» where
 /-- Pin to the current lean-tea main; bump the rev when the LeanTea /
     LeanJs API changes. Use `lake update` to fetch the latest. -/
 require «lean-tea» from git
-  "https://github.com/Verilean/lean-tea.git" @ "feat/gemini-mcp"
+  "https://github.com/Verilean/lean-tea.git" @ "main"
 
 lean_lib ChuHanLib where
   roots := #[`ChuHan.Game]
