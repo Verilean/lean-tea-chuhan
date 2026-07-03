@@ -464,14 +464,16 @@ def sbDangerIdx(rs, i, bestScore, bestI) :=
      else sbDangerIdx(rs, i + 1, bestScore, bestI))
   else bestI
 
--- ドラマの種類: 忠誠が薄ければ謀反寸前 / 野心が高ければ自立要求 / 他は驕り。
+-- ドラマの種類: 忠誠尽き兵多なら公然の反乱 / 忠誠薄なら謀反寸前 /
+-- 野心高なら自立要求 / 他は驕り。
 def sbDramaKind(r) :=
-  if r.loyalty < 30 then "revolt"
+  if r.loyalty <= 5 && r.troops >= 40 then "rebellion"
+  else if r.loyalty < 30 then "revolt"
   else if r.ambition >= 70 then "demand"
   else "murmur"
 
 -- 毎ティックの宮廷。保留中ドラマがあれば据え置き、無ければ危うい将が
--- 一定確率で"事件"を起こす(自律)。プレイヤーは要所で応じるだけ。
+-- 事件を起こす(自律)。反乱は即・確定で火を噴く。それ以外は確率。
 def sbCourtTick(court, world) :=
   if court.drama != null then court
   else
@@ -480,9 +482,12 @@ def sbCourtTick(court, world) :=
      if di < 0 then court
      else
        (let r := arrGet(rs, di);
-        let score := r.ambition + r.troops - r.loyalty;
-        if score > 55 && (rngInt() % 3 == 0)
-        then {retainers: rs, drama: {who: r.name, idx: di, kind: sbDramaKind(r)}, purges: court.purges}
+        let kind := sbDramaKind(r);
+        let fire := if kind == "rebellion" then true
+                    else (r.ambition + r.troops - r.loyalty) > 55 && (rngInt() % 3 == 0);
+        if fire
+        then {retainers: rs, drama: {who: r.name, idx: di, kind: kind}, purges: court.purges,
+              supply: court.supply, fame: court.fame, doom: court.doom}
         else court))
 
 -- 全存命将の忠誠を d だけ動かす(粛清の連鎖=兎死狗烹に使う)。
@@ -496,33 +501,65 @@ def sbLoyaltyAll(rs, d) := do
 
 -- ドラマへの応答: allow 認める / suppress 抑える / purge 粛清 / incite 焚きつける。
 -- 全て "現実の着地" 付き: 認めれば脅威が育ち、粛清すれば court が荒れる。
-def sbResolveDrama(world, choice) :=
+-- 反乱への応答: fight 迎え撃つ(会戦・博打)/ submit 頭を垂れる。
+def sbResolveRebellion(world, choice) :=
   let court := world.court;
   let idx := court.drama.idx;
   let rs := court.retainers;
   let r := arrGet(rs, idx);
   let pf := sbPlayerFaction(world.who);
-  let ei := sbTopEnemyIdx(world.regions, pf, 0, -1, 0);
-  let r2 :=
-    if choice == "allow" then
-      {name: r.name, loyalty: sbClamp(r.loyalty + 20), ambition: sbClamp(r.ambition + 15), troops: r.troops + 10, alive: true}
-    else if choice == "suppress" then
-      {name: r.name, loyalty: sbClamp(r.loyalty - 15), ambition: sbClamp(r.ambition - 10), troops: maxI(0, r.troops - 5), alive: true}
-    else if choice == "purge" then
-      {name: r.name, loyalty: 0, ambition: 0, troops: 0, alive: false}
-    else
-      {name: r.name, loyalty: r.loyalty, ambition: sbClamp(r.ambition + 5), troops: r.troops, alive: true};
-  let rsSet := arrSet(rs, idx, r2);
-  let rs2 := if choice == "purge" then sbLoyaltyAll(rsSet, 0 - 15) else rsSet;
-  let purges2 := if choice == "purge" then court.purges + 1 else court.purges;
-  let regions2 := if choice == "incite" then sbAdj(world.regions, ei, 0 - (10 + rngInt() % 15)) else world.regions;
-  let line :=
-    if choice == "allow" then sconcat("「", sconcat(r.name, "を王と認める」。将は喜び忠を誓う。だが、その兵はさらに膨らむ。"))
-    else if choice == "suppress" then sconcat(r.name, "の増長を抑えた。将は不服の色を隠さぬ。忠誠は削れた。")
-    else if choice == "purge" then sconcat(r.name, "を粛清した。脅威は消えた。だが兎死して狗烹らる――残る将に不信が差す。")
-    else sconcat(r.name, sconcat("を焚きつけ、", sconcat(arrGet(world.regions, ei).ja, "へ差し向けた。野心が外へ向いた――今のところは。")));
-  sbWorld(world.mode, world.year, world.season, world.loc, regions2,
-    arrPush(world.log, line), 0, world.who, {retainers: rs2, drama: null, purges: purges2})
+  if choice == "fight" then
+    (let strength := sbCtrlSum(world.regions, pf, 0, 0);
+     let win := (rngInt() % (strength + r.troops * 3 + 1)) < strength;
+     if win then
+       sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
+         arrPush(world.log, sconcat("⚔ 迎え撃った。", sconcat(r.name, "を討ち取り、乱を鎮めた。だが残る将の背にも、冷たいものが走る。"))),
+         0, world.who,
+         {retainers: sbLoyaltyAll(arrSet(rs, idx, {name: r.name, loyalty: 0, ambition: 0, troops: 0, alive: false}), 0 - 8),
+          drama: null, purges: court.purges, supply: court.supply, fame: court.fame + 40, doom: court.doom})
+     else
+       sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
+         arrPush(world.log, sconcat("⚔ ", sconcat(r.name, "の反乱軍に敗れた。天下を共に取った刃が、いま己を貫く。"))),
+         0, world.who,
+         {retainers: rs, drama: null, purges: court.purges, supply: court.supply, fame: court.fame, doom: "revolt"}))
+  else
+    (let r2 := {name: r.name, loyalty: 55, ambition: r.ambition, troops: r.troops, alive: true};
+     let regions2 := sbAdj(world.regions, sbTopIdxOf(world.regions, pf, 0, -1, 0), 0 - 12);
+     sbWorld(world.mode, world.year, world.season, world.loc, regions2,
+       arrPush(world.log, sconcat("頭を垂れ、", sconcat(r.name, "の望みを容れた。乱は収まったが、主従は静かに逆しまになりつつある。"))),
+       0, world.who,
+       {retainers: arrSet(rs, idx, r2), drama: null, purges: court.purges, supply: court.supply, fame: court.fame, doom: court.doom}))
+
+def sbResolveDrama(world, choice) :=
+  let court := world.court;
+  if court.drama.kind == "rebellion" then sbResolveRebellion(world, choice)
+  else
+  (let idx := court.drama.idx;
+   let rs := court.retainers;
+   let r := arrGet(rs, idx);
+   let pf := sbPlayerFaction(world.who);
+   let ei := sbTopEnemyIdx(world.regions, pf, 0, -1, 0);
+   let r2 :=
+     if choice == "allow" then
+       {name: r.name, loyalty: sbClamp(r.loyalty + 20), ambition: sbClamp(r.ambition + 15), troops: r.troops + 10, alive: true}
+     else if choice == "suppress" then
+       {name: r.name, loyalty: sbClamp(r.loyalty - 15), ambition: sbClamp(r.ambition - 10), troops: maxI(0, r.troops - 5), alive: true}
+     else if choice == "purge" then
+       {name: r.name, loyalty: 0, ambition: 0, troops: 0, alive: false}
+     else
+       {name: r.name, loyalty: r.loyalty, ambition: sbClamp(r.ambition + 5), troops: r.troops, alive: true};
+   let rsSet := arrSet(rs, idx, r2);
+   let rs2 := if choice == "purge" then sbLoyaltyAll(rsSet, 0 - 15) else rsSet;
+   let purges2 := if choice == "purge" then court.purges + 1 else court.purges;
+   let regions2 := if choice == "incite" then sbAdj(world.regions, ei, 0 - (10 + rngInt() % 15)) else world.regions;
+   let line :=
+     if choice == "allow" then sconcat("「", sconcat(r.name, "を王と認める」。将は喜び忠を誓う。だが、その兵はさらに膨らむ。"))
+     else if choice == "suppress" then sconcat(r.name, "の増長を抑えた。将は不服の色を隠さぬ。忠誠は削れた。")
+     else if choice == "purge" then sconcat(r.name, "を粛清した。脅威は消えた。だが兎死して狗烹らる――残る将に不信が差す。")
+     else sconcat(r.name, sconcat("を焚きつけ、", sconcat(arrGet(world.regions, ei).ja, "へ差し向けた。野心が外へ向いた――今のところは。")));
+   sbWorld(world.mode, world.year, world.season, world.loc, regions2,
+     arrPush(world.log, line), 0, world.who,
+     {retainers: rs2, drama: null, purges: purges2, supply: court.supply, fame: court.fame, doom: court.doom}))
 
 -- 存命で忠誠0以下・兵力40以上の将が居れば公然の反乱(功臣の乱)。
 def sbCourtRevolt(rs, i) :=
@@ -590,7 +627,7 @@ def sbExpedition(world, targetId) :=
                   else if tier == 1 then sbAdj(world.regions, mi, 0 - 20)
                   else sbAdj(world.regions, mi, 0 - 35);
   -- 壊滅かつ自国が細ければ、異郷で野望が果てる(遠征死)
-  let doom := if tier == 0 && strength < 120 then "exped" else court.doom;
+  let doom := if tier == 0 && strength < 120 then "exped_doom" else court.doom;
   let court2 := {retainers: court.retainers, drama: court.drama, purges: court.purges,
                  supply: supply2, fame: court.fame + fameGain, doom: doom};
   sbWorld(world.mode, sbNextYear(world.year, world.season), sbNextSeason(world.season),
@@ -1009,9 +1046,9 @@ def sbOutcome(world) :=
   let ch := sbCount(regions, "han", 0, 0);
   let cc := sbCount(regions, "chu", 0, 0);
   let cq := sbCount(regions, "qin", 0, 0);
-  -- 内から滅ぶ / 遠征の果て
-  if world.court.doom != null then "exped_doom"
-  else if sbCourtRevolt(world.court.retainers, 0) then "revolt"
+  -- 破滅は court.doom が直接その結末を持つ("revolt" 反乱敗北 /
+  -- "exped_doom" 遠征の果て)。反乱は会戦で決するので即死ではない。
+  if world.court.doom != null then world.court.doom
   else if world.court.purges >= 3 then "purge_doom"
   else if cp >= 6 then "win"
   else if cp == 0 then "lose"
@@ -1145,7 +1182,9 @@ def sbRoster(court) :=
 
 -- ── ドラマ(功臣の事件)の提示 ────────────────────────────────────
 def sbDramaText(who, kind) :=
-  if kind == "revolt" then
+  if kind == "rebellion" then
+    sconcat(who, "、ついに兵を挙げた。麾下の大軍が旗を翻し、こちらへ向かってくる。天下を共に取った刃が、いま牙を剥く。")
+  else if kind == "revolt" then
     sconcat(who, "、忠誠すでに薄く、麾下の兵は膨れ上がっている。離反は時間の問題――今なら、まだ間に合うかもしれぬ。")
   else if kind == "demand" then
     sconcat(who, sconcat("、大功を挙げ使者を寄越した。「", sconcat(who, "を王に。さもなくば、兵は動きませぬ」。")))
@@ -1153,16 +1192,26 @@ def sbDramaText(who, kind) :=
     sconcat(who, "の羽振りが、近頃やけに良い。功に驕り、その目に野心の色が差す。")
 
 def sbDramaPanel(drama) :=
-  sjoin([
-    "<div style='background:#2a1410;border:1px solid #a04a2f;border-radius:8px;padding:14px;margin-top:12px'>",
-    "<div style='color:#ffb38a;font-size:13px;font-weight:bold;margin-bottom:6px'>⚑ 功臣の動静 ― ", hesc(drama.who), "</div>",
-    "<p style='color:#e8d8c0;line-height:1.8;font-size:14px;margin:0 0 10px'>", hesc(sbDramaText(drama.who, drama.kind)), "</p>",
-    "<div style='display:flex;gap:8px;flex-wrap:wrap'>",
-    button("primary", {tag: "dramaChoice", choice: "allow"}, "認める"),
-    button("primary", {tag: "dramaChoice", choice: "suppress"}, "抑える"),
-    button("primary", {tag: "dramaChoice", choice: "purge"}, "粛清する"),
-    button("primary", {tag: "dramaChoice", choice: "incite"}, "敵へ焚きつける"),
-    "</div></div>"])
+  if drama.kind == "rebellion" then
+    sjoin([
+      "<div style='background:#3a0f0a;border:1px solid #d0502f;border-radius:8px;padding:14px;margin-top:12px'>",
+      "<div style='color:#ff8a6a;font-size:13px;font-weight:bold;margin-bottom:6px'>⚔ 功臣の乱 ― ", hesc(drama.who), " 挙兵</div>",
+      "<p style='color:#f0d8c8;line-height:1.8;font-size:14px;margin:0 0 10px'>", hesc(sbDramaText(drama.who, drama.kind)), "</p>",
+      "<div style='display:flex;gap:8px;flex-wrap:wrap'>",
+      button("primary", {tag: "dramaChoice", choice: "fight"}, "⚔ 迎え撃つ（会戦）"),
+      button("ghost", {tag: "dramaChoice", choice: "submit"}, "頭を垂れる"),
+      "</div></div>"])
+  else
+    sjoin([
+      "<div style='background:#2a1410;border:1px solid #a04a2f;border-radius:8px;padding:14px;margin-top:12px'>",
+      "<div style='color:#ffb38a;font-size:13px;font-weight:bold;margin-bottom:6px'>⚑ 功臣の動静 ― ", hesc(drama.who), "</div>",
+      "<p style='color:#e8d8c0;line-height:1.8;font-size:14px;margin:0 0 10px'>", hesc(sbDramaText(drama.who, drama.kind)), "</p>",
+      "<div style='display:flex;gap:8px;flex-wrap:wrap'>",
+      button("primary", {tag: "dramaChoice", choice: "allow"}, "認める"),
+      button("primary", {tag: "dramaChoice", choice: "suppress"}, "抑える"),
+      button("primary", {tag: "dramaChoice", choice: "purge"}, "粛清する"),
+      button("primary", {tag: "dramaChoice", choice: "incite"}, "敵へ焚きつける"),
+      "</div></div>"])
 
 -- ── 遠征パネル(世界の果てへ)──────────────────────────────────────
 def sbFrontierBtnLoop(fs, i, acc) :=
