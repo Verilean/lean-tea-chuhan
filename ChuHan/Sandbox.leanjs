@@ -589,6 +589,20 @@ def sbFrontierAt(fs, id, i) :=
     (if arrGet(fs, i).id == id then arrGet(fs, i) else sbFrontierAt(fs, id, i + 1))
   else arrGet(fs, 0)
 
+-- 自由入力に遠方地名が含まれれば、その遠征先 id を返す(無ければ "")。
+-- 「エジプトを目指す」等 → 兵站モデル(sbExpedition)を起動する橋渡し。
+def sbExpeditionIntent(text) :=
+  if reTest(text, "エジプト|大秦") == 1 then "daqin"
+  else if reTest(text, "日本|倭") == 1 then "wa"
+  else if reTest(text, "匈奴") == 1 then "xiongnu"
+  else if reTest(text, "朝鮮|高麗") == 1 then "chaoxian"
+  else if reTest(text, "南越|越南|ベトナム") == 1 then "nanyue"
+  else if reTest(text, "西域") == 1 then "xiyu"
+  else if reTest(text, "月氏") == 1 then "yuezhi"
+  else if reTest(text, "身毒|印度|インド|天竺") == 1 then "shendu"
+  else if reTest(text, "安息|波斯|ペルシャ|パルティア") == 1 then "anxi"
+  else ""
+
 -- 結果の語り(tier 4 大成功 … 0 壊滅)。
 def sbExpeditionLine(name, tier) :=
   if tier == 4 then
@@ -1292,7 +1306,7 @@ def viewSandbox(state) :=
     (if hasDrama then
       sbDramaPanel(w.court.drama)
     else sjoin([
-      "<input id='gmInput' placeholder='劉邦として何をする? 例: 韓信を大将軍に任じ關中を突く' ",
+      "<input id='gmInput' placeholder='劉邦として何をする? 例: エジプトを目指す / 韓信を大将軍に任じる' ",
       "style='width:100%;padding:9px;background:#0f0d0a;border:1px solid #4a3f2f;color:#eee;border-radius:6px;box-sizing:border-box'/>",
       "<div style='display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;color:#9a8d73;flex-wrap:wrap'>",
       "<button id='gmLoadAI' class='btn btn-ghost' style='font-size:12px'>ブラウザAI軍師を起動（初回DL ~1GB・WebGPU）</button>",

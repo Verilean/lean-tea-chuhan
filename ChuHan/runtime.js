@@ -956,6 +956,16 @@ function wireGmHandlers() {
   const doSend = async () => {
     const text = input.value.trim();
     if (!text || (state.world && state.world.pending === 1)) return;
+    // Free-text expedition intent ("エジプトを目指す" 等) → run the 兵站
+    // model directly. Deterministic + offline; no LLM round-trip needed.
+    const expTarget = (typeof sbExpeditionIntent === 'function') ? sbExpeditionIntent(text) : '';
+    if (expTarget) {
+      input.value = '';
+      state = update({tag: 'gmSubmit', text: text}, state);       // echo ▶ 劉邦: …
+      state = update({tag: 'expedition', target: expTarget}, state);  // 兵站モデル起動
+      persist(state); render();
+      return;
+    }
     input.value = '';
     const world = snapshot();
     state = update({tag: 'gmSubmit', text: text}, state);
