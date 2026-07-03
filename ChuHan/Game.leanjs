@@ -3064,6 +3064,8 @@ def update(msg, state) :=
                        battle: state.battle, endingId: "", toast: "" , mini: state.mini, llm: state.llm, resolve: state.resolve}
   | "sbStart" => sbStateWith(state, initWorldFor(msg.anchor, msg.mode))
   | "sbAdvance" => sbStep(state, sbTick(state.world))
+  | "sbSpecial" =>
+    (if state.phase == "sandbox" then sbStep(state, sbSpecialResolve(state.world)) else state)
   | "battleResolve" =>
     (if state.phase == "sandbox" then sbStep(state, sbBattleResolve(state.world)) else state)
   | "gmSubmit" => (
@@ -4616,6 +4618,77 @@ def sbLog(log) :=
   let stop := if n > 6 then n - 6 else 0;
   sbLogFrom(log, n - 1, stop, "")
 
+-- ── アンカー別の固有アクション ───────────────────────────────────
+def sbAnchorId(who) :=
+  if who == "呂雉" then "luzhi"
+  else if who == "秦の遺臣" then "qin"
+  else if who == "一兵卒" then "soldier"
+  else "liubang"
+
+def sbSpecialLabel(who) :=
+  let a := sbAnchorId(who);
+  if a == "luzhi" then "粛清（宮廷）"
+  else if a == "qin" then "檄（残党糾合）"
+  else if a == "soldier" then "斬り込み（手柄）"
+  else "募兵"
+
+-- 呂雉：宮廷の闇。敵将を除くが、酷薄は内に不穏を残しうる。
+def sbPurge(world) :=
+  let regions := world.regions;
+  let ei := sbTopEnemyIdx(regions, "han", 0, -1, 0);
+  let er := arrGet(regions, ei);
+  let backlash := rngInt() % 4 == 0;
+  let regions2 := if backlash
+    then sbAdj(sbAdj(regions, ei, -12), sbTopIdxOf(regions, "han", 0, -1, 0), -8)
+    else sbAdj(regions, ei, -22);
+  let line := if backlash
+    then sconcat("粛清。", sconcat(er.ja, "の敵将を除いたが、酷薄の噂が漢の内に不穏を残した。"))
+    else sconcat("粛清。宮廷の闇が", sconcat(er.ja, "の敵将を静かに消した。証は、どこにも残らぬ。"));
+  sbWorld(world.mode, sbNextYear(world.year, world.season), sbNextSeason(world.season),
+    world.loc, regions2, arrPush(world.log, line), 0, world.who)
+
+-- 秦の遺臣：檄を飛ばし残党を糾合。關中を厚くし、隙あらば旗を立てる。
+def sbRally(world) :=
+  let r0 := sbAdj(world.regions, sbIdxOf(world.regions, "guanzhong", 0), 15);
+  let r1 := sbAdj(r0, sbIdxOf(r0, "xianyang", 0), 15);
+  let ri := rngInt() % arrLen(r1);
+  let tr := arrGet(r1, ri);
+  let spark := tr.owner != "qin" && tr.ctrl < 45;
+  let regions2 := if spark then sbOwn(r1, ri, "qin") else r1;
+  let line := if spark
+    then sconcat("檄。", sconcat(tr.ja, "で秦の残党が蜂起し、旗を立てた。復興は、夢ではない。"))
+    else "檄。關中の秦民が結集する。灰の下に、まだ火は残っている。";
+  sbWorld(world.mode, sbNextYear(world.year, world.season), sbNextSeason(world.season),
+    world.loc, regions2, arrPush(world.log, line), 0, world.who)
+
+-- 一兵卒：斬り込み。個人の武功。負傷・出世の綾がある。
+def sbCharge(world) :=
+  let regions := world.regions;
+  let mi := sbTopIdxOf(regions, "han", 0, -1, 0);
+  let roll := rngInt() % 3;
+  let regions2 := if roll == 0 then regions else sbAdj(regions, mi, 6);
+  let line := if roll == 0 then "斬り込み。乱戦の中、かすり傷を負って生きて帰った。手柄は、また今度。"
+    else if roll == 1 then sconcat("斬り込み。", sconcat(arrGet(regions, mi).ja, "の陣頭で敵将を討った。誰かが、見ていてくれただろうか。"))
+    else "斬り込み。抜群の働き。隊長がお前の名を書き留めた。……出世の、最初の一歩。";
+  sbWorld(world.mode, sbNextYear(world.year, world.season), sbNextSeason(world.season),
+    world.loc, regions2, arrPush(world.log, line), 0, world.who)
+
+-- 劉邦：募兵。地味だが底堅い増強。
+def sbLevy(world) :=
+  let regions := world.regions;
+  let mi := sbTopIdxOf(regions, "han", 0, -1, 0);
+  sbWorld(world.mode, sbNextYear(world.year, world.season), sbNextSeason(world.season),
+    world.loc, sbAdj(regions, mi, 8),
+    arrPush(world.log, sconcat("募兵。", sconcat(arrGet(regions, mi).ja, "で壮丁が集まり、旗下が厚くなった。"))),
+    0, world.who)
+
+def sbSpecialResolve(world) :=
+  let a := sbAnchorId(world.who);
+  if a == "luzhi" then sbPurge(world)
+  else if a == "qin" then sbRally(world)
+  else if a == "soldier" then sbCharge(world)
+  else sbLevy(world)
+
 -- ── 勝敗・終了条件 ───────────────────────────────────────────────
 def sbPlayerFaction(who) := if who == "秦の遺臣" then "qin" else "han"
 
@@ -4744,6 +4817,7 @@ def viewSandbox(state) :=
     "</div>",
     "<div style='display:flex;gap:8px;margin-top:8px;flex-wrap:wrap'>",
     "<button id='gmSend' class='btn btn-primary'>行動する（AI 軍師）</button>",
+    button("primary", {tag: "sbSpecial"}, sbSpecialLabel(w.who)),
     button("primary", {tag: "sbAdvance"}, "季を進める（静観）▶"),
     "<button id='sbBattle' class='btn btn-ghost'>⚔ 会戦を見る</button>",
     button("ghost", {tag: "toTitle"}, "タイトルへ"),
