@@ -4417,6 +4417,14 @@ extern js "(c,x,y,r,a,b)=>{c.arc(x,y,r,a,b);}" ctxArc
 extern js "(c,s,x,y)=>{c.fillText(s,x,y);}" ctxFillText
 extern js "Math.sin" mathSin
 extern js "Math.max" mathMax
+extern js "Math.min" mathMin
+extern js "Math.hypot" mathHypot
+extern js "Math.atan2" mathAtan2
+extern js "Math.random" mathRandom
+extern js "Math.floor" mathFloor
+extern js "(c,a)=>{c.globalAlpha=a;}" ctxGlobalAlpha
+-- keys オブジェクトの押下状態(1/0)。runtime.js の action.keys を読む。
+extern js "(k,name)=>k[name]?1:0" keyDown
 -- 数値レンジ列(for ループ用): [lo, lo+step, … < hi]。
 extern js "(lo,hi,step)=>{const a=[];for(let i=lo;i<hi;i+=(step||1))a.push(i);return a;}" range
 
@@ -4489,6 +4497,114 @@ def drawBattle(ctx, w, h, b) := do
     ctxStroke(ctx)
   );
   null
+
+-- ── 一兵士アクション: シミュレーション + 描画(ロジックは LeanJs、
+-- rAF・キー入力・overlay は runtime.js が持つ)──────────────────────
+
+-- 初期状態(canvas 中央、HP100、討取目標15)。
+def actionInitState(w, h) :=
+  {px: w / 2, py: h / 2, hp: 100, fx: 1, fy: 0, cd: 0, slash: 0,
+   enemies: [], kills: 0, target: 15, spawnT: 0, over: false, win: false}
+
+-- 画面端のランダムな位置に敵を1体生成。
+def actionSpawnEnemy(w, h) :=
+  let edge := mathFloor(mathRandom() * 4);
+  let x := if edge == 0 then mathRandom() * w
+           else if edge == 1 then mathRandom() * w
+           else if edge == 2 then 0 - 10
+           else w + 10;
+  let y := if edge == 0 then 0 - 10
+           else if edge == 1 then h + 10
+           else mathRandom() * h;
+  {x: x, y: y, hp: 2, hit: 0}
+
+-- 1フレーム分の状態遷移。keys は runtime.js の action.keys。
+def actionStep(st, keys, w, h) :=
+  if st.over then st
+  else do
+    let mx := (if keyDown(keys, "d") == 1 || keyDown(keys, "arrowright") == 1 then 1 else 0)
+            - (if keyDown(keys, "a") == 1 || keyDown(keys, "arrowleft") == 1 then 1 else 0);
+    let my := (if keyDown(keys, "s") == 1 || keyDown(keys, "arrowdown") == 1 then 1 else 0)
+            - (if keyDown(keys, "w") == 1 || keyDown(keys, "arrowup") == 1 then 1 else 0);
+    let moving := mx != 0 || my != 0;
+    let ml := if moving then mathHypot(mx, my) else 1;
+    let fx := if moving then mx / ml else st.fx;
+    let fy := if moving then my / ml else st.fy;
+    let px := mathMax(10, mathMin(w - 10, if moving then st.px + mx / ml * 3.4 else st.px));
+    let py := mathMax(10, mathMin(h - 10, if moving then st.py + my / ml * 3.4 else st.py));
+    let cdDec := if st.cd > 0 then st.cd - 1 else 0;
+    let slashDec := if st.slash > 0 then st.slash - 1 else 0;
+    let ne := arrLen(st.enemies);
+    let canSpawn := ne < 8 && (st.kills + ne) < st.target + 6;
+    let spawnTa := if canSpawn then st.spawnT - 1 else st.spawnT;
+    let doSpawn := canSpawn && spawnTa <= 0;
+    let spawnT := if doSpawn then 26 else spawnTa;
+    let baseEnemies := if doSpawn then arrPush(st.enemies, actionSpawnEnemy(w, h)) else st.enemies;
+    -- 敵AI(player を追う)+ 接触ダメージ
+    let mut hp := st.hp;
+    let mut moved := [];
+    for e in baseEnemies do (
+      let dx := px - e.x;
+      let dy := py - e.y;
+      let dRaw := mathHypot(dx, dy);
+      let d := if dRaw == 0 then 1 else dRaw;
+      let e2hit := if e.hit > 0 then e.hit - 1 else 0;
+      let hurt := d < 14 && e2hit == 0;
+      hp := if hurt then hp - 6 else hp;
+      moved := arrPush(moved, {x: e.x + dx / d * 1.5, y: e.y + dy / d * 1.5,
+                               hp: e.hp, hit: if hurt then 30 else e2hit})
+    );
+    -- 斬撃(J / Space、クールダウン0のとき)
+    let slashing := (keyDown(keys, "j") == 1 || keyDown(keys, " ") == 1) && cdDec == 0;
+    let cd := if slashing then 16 else cdDec;
+    let slashTimer := if slashing then 8 else slashDec;
+    let ax := px + fx * 22;
+    let ay := py + fy * 22;
+    let mut slashed := [];
+    for e in moved do (
+      let hitBySlash := slashing && mathHypot(e.x - ax, e.y - ay) < 26;
+      slashed := arrPush(slashed, {x: e.x, y: e.y,
+                                   hp: if hitBySlash then e.hp - 1 else e.hp,
+                                   hit: if hitBySlash then 8 else e.hit})
+    );
+    -- 討取(HP0以下)を除いて数える
+    let mut kills := st.kills;
+    let mut live := [];
+    for e in slashed do (
+      let alive := e.hp > 0;
+      kills := if alive then kills else kills + 1;
+      live := if alive then arrPush(live, e) else live
+    );
+    let win := kills >= st.target;
+    let dead := hp <= 0;
+    {px: px, py: py, hp: if dead then 0 else hp, fx: fx, fy: fy,
+     cd: cd, slash: slashTimer, enemies: live, kills: kills,
+     target: st.target, spawnT: spawnT, over: win || dead, win: win}
+
+-- アクション画面の描画(敵・斬撃弧・自機)。HUD は runtime.js。
+def actionDraw(ctx, st, w, h) := do
+  let _ := ctxSetFill(ctx, "#14110c");
+  let _ := ctxFillRect(ctx, 0, 0, w, h);
+  let _ := ctxSetFill(ctx, "#ff5a4d");
+  for e in st.enemies do (
+    let _ := ctxGlobalAlpha(ctx, if e.hit > 0 then 0.6 else 1);
+    let _ := ctxBeginPath(ctx);
+    let _ := ctxArc(ctx, e.x, e.y, 6, 0, 6.29);
+    ctxFill(ctx)
+  );
+  let _ := ctxGlobalAlpha(ctx, 1);
+  let _ := if st.slash > 0 then (
+    let _ := ctxSetStroke(ctx, "#ffd54a");
+    let _ := ctxSetLineWidth(ctx, 3);
+    let _ := ctxBeginPath(ctx);
+    let a := mathAtan2(st.fy, st.fx);
+    let _ := ctxArc(ctx, st.px, st.py, 24, a - 0.7, a + 0.7);
+    ctxStroke(ctx)
+  ) else null;
+  let _ := ctxSetFill(ctx, "#4d8cff");
+  let _ := ctxBeginPath(ctx);
+  let _ := ctxArc(ctx, st.px, st.py, 8, 0, 6.29);
+  ctxFill(ctx)
 
 def sbWorld(mode, year, season, loc, regions, log, pending, who) :=
   {mode: mode, year: year, season: season, loc: loc,

@@ -183,61 +183,23 @@ function ensureActionOverlay() {
   return ov;
 }
 
-function actionInit(c) {
-  return { px: c.width/2, py: c.height/2, hp: 100, fx: 1, fy: 0, cd: 0,
-           slash: 0, enemies: [], kills: 0, target: 15, spawnT: 0,
-           over: false, win: false };
-}
-
-function actionSpawn(c, st) {
-  const edge = Math.floor(Math.random()*4);
-  let x, y;
-  if (edge===0){ x=Math.random()*c.width; y=-10; }
-  else if (edge===1){ x=Math.random()*c.width; y=c.height+10; }
-  else if (edge===2){ x=-10; y=Math.random()*c.height; }
-  else { x=c.width+10; y=Math.random()*c.height; }
-  st.enemies.push({ x, y, hp: 2, hit: 0 });
-}
-
+// actionInitState / actionSpawnEnemy / actionStep / actionDraw now live
+// in Game.leanjs (compiled): the movement / enemy-AI / combat logic is
+// LeanJs do/for, the canvas draw is thin externs. This host frame owns
+// the rAF loop, the live canvas, the HUD text, and the end transition.
 function actionFrame() {
   const ov = document.getElementById('actionOverlay');
   const c = document.getElementById('actionCanvas');
   if (!ov || ov.style.display === 'none' || !c) { action.raf = null; return; }
-  const st = action.st, ctx = c.getContext('2d'), W = c.width, H = c.height;
-  if (!st.over) {
-    const k = action.keys; let mx = 0, my = 0;
-    if (k['a']||k['arrowleft']) mx -= 1;
-    if (k['d']||k['arrowright']) mx += 1;
-    if (k['w']||k['arrowup']) my -= 1;
-    if (k['s']||k['arrowdown']) my += 1;
-    if (mx||my){ const l=Math.hypot(mx,my); st.px+=mx/l*3.4; st.py+=my/l*3.4; st.fx=mx/l; st.fy=my/l; }
-    st.px = Math.max(10, Math.min(W-10, st.px)); st.py = Math.max(10, Math.min(H-10, st.py));
-    if (st.cd>0) st.cd--; if (st.slash>0) st.slash--;
-    if (st.enemies.length < 8 && (st.kills + st.enemies.length) < st.target + 6) {
-      st.spawnT--; if (st.spawnT<=0){ actionSpawn(c, st); st.spawnT = 26; }
-    }
-    for (const e of st.enemies) {
-      const dx=st.px-e.x, dy=st.py-e.y, d=Math.hypot(dx,dy)||1;
-      e.x += dx/d*1.5; e.y += dy/d*1.5; if (e.hit>0) e.hit--;
-      if (d < 14 && e.hit===0){ st.hp -= 6; e.hit = 30; }
-    }
-    if ((k['j']||k[' ']) && st.cd===0){ st.cd = 16; st.slash = 8;
-      const ax=st.px+st.fx*22, ay=st.py+st.fy*22;
-      for (const e of st.enemies){ if (Math.hypot(e.x-ax,e.y-ay) < 26){ e.hp--; e.hit=8; } }
-    }
-    st.enemies = st.enemies.filter(e => { if (e.hp<=0){ st.kills++; return false; } return true; });
-    if (st.kills >= st.target){ st.over=true; st.win=true; showActionEnd(); }
-    else if (st.hp <= 0){ st.hp=0; st.over=true; st.win=false; showActionEnd(); }
-  }
-  ctx.fillStyle='#14110c'; ctx.fillRect(0,0,W,H);
-  ctx.fillStyle='#ff5a4d';
-  for (const e of st.enemies){ ctx.globalAlpha = e.hit>0?0.6:1; ctx.beginPath(); ctx.arc(e.x,e.y,6,0,6.29); ctx.fill(); }
-  ctx.globalAlpha=1;
-  if (st.slash>0){ ctx.strokeStyle='#ffd54a'; ctx.lineWidth=3; ctx.beginPath();
-    ctx.arc(st.px, st.py, 24, Math.atan2(st.fy,st.fx)-0.7, Math.atan2(st.fy,st.fx)+0.7); ctx.stroke(); }
-  ctx.fillStyle='#4d8cff'; ctx.beginPath(); ctx.arc(st.px,st.py,8,0,6.29); ctx.fill();
+  const ctx = c.getContext('2d'), W = c.width, H = c.height;
+  const wasOver = action.st.over;
+  action.st = actionStep(action.st, action.keys, W, H);  // compiled LeanJs
+  actionDraw(ctx, action.st, W, H);                       // compiled LeanJs
+  const st = action.st;
   document.getElementById('actionHud').textContent =
-    'HP ' + Math.max(0,st.hp) + '  ・  討取 ' + st.kills + ' / ' + st.target + (st.over ? (st.win?'  ― 勝利！':'  ― 敗走…') : '');
+    'HP ' + Math.max(0, st.hp) + '  ・  討取 ' + st.kills + ' / ' + st.target +
+    (st.over ? (st.win ? '  ― 勝利！' : '  ― 敗走…') : '');
+  if (st.over && !wasOver) showActionEnd();
   action.raf = requestAnimationFrame(actionFrame);
 }
 
@@ -259,7 +221,7 @@ function openAction() {
   ov.style.display = 'flex';
   ov.querySelector('#actionClose').style.display = 'none';
   const c = document.getElementById('actionCanvas');
-  action.st = actionInit(c);
+  action.st = actionInitState(c.width, c.height);   // compiled LeanJs
   action.keys = {};
   if (!action.kb){ document.addEventListener('keydown', actionKeyDown); document.addEventListener('keyup', actionKeyUp); action.kb = true; }
   action.raf = requestAnimationFrame(actionFrame);
