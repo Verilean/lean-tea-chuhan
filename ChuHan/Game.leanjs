@@ -3070,6 +3070,8 @@ def update(msg, state) :=
                        battle: state.battle, endingId: "", toast: "" , mini: state.mini, llm: state.llm, resolve: state.resolve}
   | "sbStart" => sbStateWith(state, initWorldFor(msg.anchor, msg.mode))
   | "sbAdvance" => sbStep(state, sbTick(state.world))
+  | "dramaChoice" =>
+    (if state.phase == "sandbox" then sbStep(state, sbResolveDrama(state.world, msg.choice)) else state)
   | "sbSpecial" =>
     (if state.phase == "sandbox" then sbStep(state, sbSpecialResolve(state.world)) else state)
   | "sbActionResult" => (
@@ -3084,7 +3086,7 @@ def update(msg, state) :=
          then sconcat("🗡 出撃。敵 ", sconcat(jstr(msg.kills), " を斬り伏せ、前線を押し込んだ。名も無き働きが、確かに天下を動かす。"))
          else "🗡 出撃。深手を負って退いた。命あっての物種、手柄はまた次に。";
        sbStep(state, sbWorld(w.mode, sbNextYear(w.year, w.season),
-         sbNextSeason(w.season), w.loc, regions2, arrPush(w.log, line), 0, w.who)))
+         sbNextSeason(w.season), w.loc, regions2, arrPush(w.log, line), 0, w.who, w.court)))
     else state)
   | "battleResolve" =>
     (if state.phase == "sandbox" then sbStep(state, sbBattleResolve(state.world)) else state)
@@ -3092,18 +3094,18 @@ def update(msg, state) :=
     let w := state.world;
     sbStateWith(state,
       sbWorld(w.mode, w.year, w.season, w.loc, w.regions,
-        arrPush(w.log, sconcat(sconcat("▶ ", sconcat(w.who, ": ")), msg.text)), 1, w.who)))
+        arrPush(w.log, sconcat(sconcat("▶ ", sconcat(w.who, ": ")), msg.text)), 1, w.who, w.court)))
   | "gmResult" => (
     let w := state.world;
     let regions2 := sbApplyDeltas(w.regions, msg.deltas, 0);
     sbStep(state,
       sbWorld(w.mode, sbNextYear(w.year, w.season), sbNextSeason(w.season),
-        w.loc, regions2, arrPush(w.log, msg.narration), 0, w.who)))
+        w.loc, regions2, arrPush(w.log, msg.narration), 0, w.who, w.court)))
   | "gmError" => (
     let w2 := sbTick(state.world);
     sbStep(state,
       sbWorld(w2.mode, w2.year, w2.season, w2.loc, w2.regions,
-        arrPush(w2.log, "（AI 不通ゆえ、天下は独りでに動いた）"), 0, w2.who)))
+        arrPush(w2.log, "（AI 不通ゆえ、天下は独りでに動いた）"), 0, w2.who, w2.court)))
   | "toTitle" => { phase: "title", lang: state.lang,
                        char: "", sceneId: "", beat: 0,
                        stats: state.stats, flags: state.flags,
@@ -4703,9 +4705,104 @@ def sbStepAgents(agents, w) := do
   );
   out
 
-def sbWorld(mode, year, season, loc, regions, log, pending, who) :=
+def sbWorld(mode, year, season, loc, regions, log, pending, who, court) :=
   {mode: mode, year: year, season: season, loc: loc,
-   regions: regions, log: log, pending: pending, who: who}
+   regions: regions, log: log, pending: pending, who: who, court: court}
+
+-- ── 功臣(部将)——自律して動き、勝てば脅威になる ──────────────────
+-- loyalty 忠誠 / ambition 野心 / troops 兵力 / alive 存命。
+-- 「有能な部下ほど勝たせると脅威になる」= 功臣のジレンマの担い手。
+def initRetainers(anchor) :=
+  if anchor == "liubang" then [
+    {name: "韓信", loyalty: 60, ambition: 85, troops: 55, alive: true},
+    {name: "彭越", loyalty: 55, ambition: 60, troops: 35, alive: true},
+    {name: "英布", loyalty: 50, ambition: 70, troops: 45, alive: true},
+    {name: "蕭何", loyalty: 92, ambition: 12, troops: 8,  alive: true},
+    {name: "張良", loyalty: 88, ambition: 10, troops: 5,  alive: true}
+  ] else [
+    {name: "范増",   loyalty: 72, ambition: 30, troops: 22, alive: true},
+    {name: "鍾離眜", loyalty: 66, ambition: 42, troops: 30, alive: true}
+  ]
+
+-- court: 功臣たち + 保留中のドラマ(dilemma)+ 粛清回数。
+def initCourt(anchor) := {retainers: initRetainers(anchor), drama: null, purges: 0}
+
+-- 最も"危うい"功臣の index(野心+兵力-忠誠 が最大)。無ければ -1。
+def sbDangerIdx(rs, i, bestScore, bestI) :=
+  if i < arrLen(rs) then
+    (let r := arrGet(rs, i);
+     let sc := if r.alive then r.ambition + r.troops - r.loyalty else 0 - 999;
+     if sc > bestScore then sbDangerIdx(rs, i + 1, sc, i)
+     else sbDangerIdx(rs, i + 1, bestScore, bestI))
+  else bestI
+
+-- ドラマの種類: 忠誠が薄ければ謀反寸前 / 野心が高ければ自立要求 / 他は驕り。
+def sbDramaKind(r) :=
+  if r.loyalty < 30 then "revolt"
+  else if r.ambition >= 70 then "demand"
+  else "murmur"
+
+-- 毎ティックの宮廷。保留中ドラマがあれば据え置き、無ければ危うい将が
+-- 一定確率で"事件"を起こす(自律)。プレイヤーは要所で応じるだけ。
+def sbCourtTick(court, world) :=
+  if court.drama != null then court
+  else
+    (let rs := court.retainers;
+     let di := sbDangerIdx(rs, 0, 0, 0 - 1);
+     if di < 0 then court
+     else
+       (let r := arrGet(rs, di);
+        let score := r.ambition + r.troops - r.loyalty;
+        if score > 55 && (rngInt() % 3 == 0)
+        then {retainers: rs, drama: {who: r.name, idx: di, kind: sbDramaKind(r)}, purges: court.purges}
+        else court))
+
+-- 全存命将の忠誠を d だけ動かす(粛清の連鎖=兎死狗烹に使う)。
+def sbLoyaltyAll(rs, d) := do
+  let mut out := [];
+  for r in rs do (
+    out := arrPush(out, {name: r.name, loyalty: sbClamp(r.loyalty + d),
+                         ambition: r.ambition, troops: r.troops, alive: r.alive})
+  );
+  out
+
+-- ドラマへの応答: allow 認める / suppress 抑える / purge 粛清 / incite 焚きつける。
+-- 全て "現実の着地" 付き: 認めれば脅威が育ち、粛清すれば court が荒れる。
+def sbResolveDrama(world, choice) :=
+  let court := world.court;
+  let idx := court.drama.idx;
+  let rs := court.retainers;
+  let r := arrGet(rs, idx);
+  let pf := sbPlayerFaction(world.who);
+  let ei := sbTopEnemyIdx(world.regions, pf, 0, -1, 0);
+  let r2 :=
+    if choice == "allow" then
+      {name: r.name, loyalty: sbClamp(r.loyalty + 20), ambition: sbClamp(r.ambition + 15), troops: r.troops + 10, alive: true}
+    else if choice == "suppress" then
+      {name: r.name, loyalty: sbClamp(r.loyalty - 15), ambition: sbClamp(r.ambition - 10), troops: maxI(0, r.troops - 5), alive: true}
+    else if choice == "purge" then
+      {name: r.name, loyalty: 0, ambition: 0, troops: 0, alive: false}
+    else
+      {name: r.name, loyalty: r.loyalty, ambition: sbClamp(r.ambition + 5), troops: r.troops, alive: true};
+  let rsSet := arrSet(rs, idx, r2);
+  let rs2 := if choice == "purge" then sbLoyaltyAll(rsSet, 0 - 15) else rsSet;
+  let purges2 := if choice == "purge" then court.purges + 1 else court.purges;
+  let regions2 := if choice == "incite" then sbAdj(world.regions, ei, 0 - (10 + rngInt() % 15)) else world.regions;
+  let line :=
+    if choice == "allow" then sconcat("「", sconcat(r.name, "を王と認める」。将は喜び忠を誓う。だが、その兵はさらに膨らむ。"))
+    else if choice == "suppress" then sconcat(r.name, "の増長を抑えた。将は不服の色を隠さぬ。忠誠は削れた。")
+    else if choice == "purge" then sconcat(r.name, "を粛清した。脅威は消えた。だが兎死して狗烹らる――残る将に不信が差す。")
+    else sconcat(r.name, sconcat("を焚きつけ、", sconcat(arrGet(world.regions, ei).ja, "へ差し向けた。野心が外へ向いた――今のところは。")));
+  sbWorld(world.mode, world.year, world.season, world.loc, regions2,
+    arrPush(world.log, line), 0, world.who, {retainers: rs2, drama: null, purges: purges2})
+
+-- 存命で忠誠0以下・兵力40以上の将が居れば公然の反乱(功臣の乱)。
+def sbCourtRevolt(rs, i) :=
+  if i < arrLen(rs) then
+    (let r := arrGet(rs, i);
+     if r.alive && r.loyalty <= 0 && r.troops >= 40 then true
+     else sbCourtRevolt(rs, i + 1))
+  else false
 
 -- ── 主人公アンカー ────────────────────────────────────────────────
 def sbAnchorLabel(anchor) :=
@@ -4734,7 +4831,7 @@ def sbQinBoost(regions) :=
 def initWorldFor(anchor, mode) :=
   let regions := if anchor == "qin" then sbQinBoost(sbRegions) else sbRegions;
   let loc := if anchor == "qin" then "guanzhong" else "hanzhong";
-  sbWorld(mode, 206, 0, loc, regions, [sbOpening(anchor)], 0, sbAnchorLabel(anchor))
+  sbWorld(mode, 206, 0, loc, regions, [sbOpening(anchor)], 0, sbAnchorLabel(anchor), initCourt(anchor))
 
 def initWorld(mode) := initWorldFor("liubang", mode)
 
@@ -4900,9 +4997,10 @@ def sbEvent(world) :=
 
 def sbTick(world) :=
   let e := sbTickEvent(world);
+  let court2 := sbCourtTick(world.court, world);
   sbWorld(world.mode, sbNextYear(world.year, world.season),
     sbNextSeason(world.season), world.loc,
-    e.regions, arrPush(world.log, e.line), 0, world.who)
+    e.regions, arrPush(world.log, e.line), 0, world.who, court2)
 
 -- ── 会戦の解決(演出の裏で盤面を動かす)──────────────────────────
 def sbCtrlSum(regions, f, i, acc) :=
@@ -4949,7 +5047,7 @@ def sbBattleResolve(world) :=
                   sconcat(sbName(pf), "軍は押し返された。損害は小さくない。"))));
   sbWorld(world.mode, sbNextYear(world.year, world.season),
     sbNextSeason(world.season), world.loc,
-    regions2, arrPush(world.log, line), 0, world.who)
+    regions2, arrPush(world.log, line), 0, world.who, world.court)
 
 -- ── マップ描画(SVG 文字列)──────────────────────────────────────
 def sbRad(ctrl) := if ctrl > 70 then 7 else if ctrl > 40 then 5 else 4
@@ -5032,7 +5130,7 @@ def sbPurge(world) :=
     then sconcat("粛清。", sconcat(er.ja, "の敵将を除いたが、酷薄の噂が漢の内に不穏を残した。"))
     else sconcat("粛清。宮廷の闇が", sconcat(er.ja, "の敵将を静かに消した。証は、どこにも残らぬ。"));
   sbWorld(world.mode, sbNextYear(world.year, world.season), sbNextSeason(world.season),
-    world.loc, regions2, arrPush(world.log, line), 0, world.who)
+    world.loc, regions2, arrPush(world.log, line), 0, world.who, world.court)
 
 -- 秦の遺臣：檄を飛ばし残党を糾合。關中を厚くし、隙あらば旗を立てる。
 def sbRally(world) :=
@@ -5046,7 +5144,7 @@ def sbRally(world) :=
     then sconcat("檄。", sconcat(tr.ja, "で秦の残党が蜂起し、旗を立てた。復興は、夢ではない。"))
     else "檄。關中の秦民が結集する。灰の下に、まだ火は残っている。";
   sbWorld(world.mode, sbNextYear(world.year, world.season), sbNextSeason(world.season),
-    world.loc, regions2, arrPush(world.log, line), 0, world.who)
+    world.loc, regions2, arrPush(world.log, line), 0, world.who, world.court)
 
 -- 一兵卒：斬り込み。個人の武功。負傷・出世の綾がある。
 def sbCharge(world) :=
@@ -5058,7 +5156,7 @@ def sbCharge(world) :=
     else if roll == 1 then sconcat("斬り込み。", sconcat(arrGet(regions, mi).ja, "の陣頭で敵将を討った。誰かが、見ていてくれただろうか。"))
     else "斬り込み。抜群の働き。隊長がお前の名を書き留めた。……出世の、最初の一歩。";
   sbWorld(world.mode, sbNextYear(world.year, world.season), sbNextSeason(world.season),
-    world.loc, regions2, arrPush(world.log, line), 0, world.who)
+    world.loc, regions2, arrPush(world.log, line), 0, world.who, world.court)
 
 -- 劉邦：募兵。地味だが底堅い増強。
 def sbLevy(world) :=
@@ -5067,7 +5165,7 @@ def sbLevy(world) :=
   sbWorld(world.mode, sbNextYear(world.year, world.season), sbNextSeason(world.season),
     world.loc, sbAdj(regions, mi, 8),
     arrPush(world.log, sconcat("募兵。", sconcat(arrGet(regions, mi).ja, "で壮丁が集まり、旗下が厚くなった。"))),
-    0, world.who)
+    0, world.who, world.court)
 
 def sbSpecialResolve(world) :=
   let a := sbAnchorId(world.who);
@@ -5087,7 +5185,10 @@ def sbOutcome(world) :=
   let ch := sbCount(regions, "han", 0, 0);
   let cc := sbCount(regions, "chu", 0, 0);
   let cq := sbCount(regions, "qin", 0, 0);
-  if cp >= 6 then "win"
+  -- 内から滅ぶ:功臣の乱 / 粛清の果ての孤立(功臣のジレンマの帰結)
+  if sbCourtRevolt(world.court.retainers, 0) then "revolt"
+  else if world.court.purges >= 3 then "purge_doom"
+  else if cp >= 6 then "win"
   else if cp == 0 then "lose"
   else if ch >= 6 then "rival"
   else if cc >= 6 then "rival"
@@ -5099,6 +5200,8 @@ def sbEndTitle(o) :=
   if o == "win" then "天下統一"
   else if o == "lose" then "敗亡"
   else if o == "rival" then "落日"
+  else if o == "revolt" then "功臣の乱"
+  else if o == "purge_doom" then "孤立無援"
   else "時代の終わり"
 
 def sbEndText(o, who) :=
@@ -5108,6 +5211,10 @@ def sbEndText(o, who) :=
     sconcat(who, "、ここに敗れる。旗は倒れ、名は塵に紛れた。だが乱世は、次の誰かを待っている。")
   else if o == "rival" then
     "天下は他者の手に落ちた。あなたの物語は、正史の脚注に一行だけ残るだろう。"
+  else if o == "revolt" then
+    sconcat(who, "が最も頼りにした将が、ついに兵を返した。天下を共に取った刃が、いま己の喉元にある。――功臣は、飼い慣らせぬ。")
+  else if o == "purge_doom" then
+    sconcat(who, "は疑い、斬り、また斬った。脅威は消え――そして、誰も残らなかった。玉座の周りは、静かすぎるほど静かだ。")
   else
     sconcat("時は流れ、BCE 202 に至る。", sconcat(who, "の戦いはまだ終わらぬが、ひとつの時代は確かに幕を下ろした。"))
 
@@ -5182,8 +5289,55 @@ def viewSbSetup(state) :=
     "</div></div>"
   ])
 
+-- ── 功臣ロスター表示 ──────────────────────────────────────────────
+def sbRetColor(r) :=
+  if r.loyalty < 30 then "#ef4444" else if r.loyalty < 60 then "#ca8a04" else "#22c55e"
+
+def sbRosterRow(r) :=
+  if r.alive then
+    sjoin([
+      "<div style='display:flex;justify-content:space-between;font-size:12px;padding:2px 6px'>",
+      "<span style='color:", sbRetColor(r), "'>", hesc(r.name), "</span>",
+      "<span style='color:#9a8d73'>忠", numStr(r.loyalty), " 野", numStr(r.ambition), " 兵", numStr(r.troops), "</span>",
+      "</div>"])
+  else
+    sjoin(["<div style='display:flex;justify-content:space-between;font-size:12px;padding:2px 6px;opacity:0.4'>",
+      "<span style='text-decoration:line-through'>", hesc(r.name), "</span><span>粛清</span></div>"])
+
+def sbRosterLoop(rs, i, acc) :=
+  if i < arrLen(rs) then sbRosterLoop(rs, i + 1, sconcat(acc, sbRosterRow(arrGet(rs, i))))
+  else acc
+
+def sbRoster(court) :=
+  sjoin(["<div style='background:#14110c;border:1px solid #3a2f1f;border-radius:6px;padding:4px 0;margin-top:8px'>",
+    "<div style='font-size:11px;color:#8a7d63;padding:0 6px 2px'>功臣 ― 忠誠が低く兵が多いほど危うい。粛清が過ぎれば孤立する。</div>",
+    sbRosterLoop(court.retainers, 0, ""),
+    "</div>"])
+
+-- ── ドラマ(功臣の事件)の提示 ────────────────────────────────────
+def sbDramaText(who, kind) :=
+  if kind == "revolt" then
+    sconcat(who, "、忠誠すでに薄く、麾下の兵は膨れ上がっている。離反は時間の問題――今なら、まだ間に合うかもしれぬ。")
+  else if kind == "demand" then
+    sconcat(who, sconcat("、大功を挙げ使者を寄越した。「", sconcat(who, "を王に。さもなくば、兵は動きませぬ」。")))
+  else
+    sconcat(who, "の羽振りが、近頃やけに良い。功に驕り、その目に野心の色が差す。")
+
+def sbDramaPanel(drama) :=
+  sjoin([
+    "<div style='background:#2a1410;border:1px solid #a04a2f;border-radius:8px;padding:14px;margin-top:12px'>",
+    "<div style='color:#ffb38a;font-size:13px;font-weight:bold;margin-bottom:6px'>⚑ 功臣の動静 ― ", hesc(drama.who), "</div>",
+    "<p style='color:#e8d8c0;line-height:1.8;font-size:14px;margin:0 0 10px'>", hesc(sbDramaText(drama.who, drama.kind)), "</p>",
+    "<div style='display:flex;gap:8px;flex-wrap:wrap'>",
+    button("primary", {tag: "dramaChoice", choice: "allow"}, "認める"),
+    button("primary", {tag: "dramaChoice", choice: "suppress"}, "抑える"),
+    button("primary", {tag: "dramaChoice", choice: "purge"}, "粛清する"),
+    button("primary", {tag: "dramaChoice", choice: "incite"}, "敵へ焚きつける"),
+    "</div></div>"])
+
 def viewSandbox(state) :=
   let w := state.world;
+  let hasDrama := w.court.drama != null;
   let map := sjoin([
     "<svg viewBox='0 0 100 92' style='width:100%;max-width:540px;height:auto;background:#17140f;border:1px solid #4a3f2f;border-radius:8px;display:block;margin:0 auto'>",
     sbMapLoop(w.regions, 0, ""),
@@ -5204,6 +5358,7 @@ def viewSandbox(state) :=
     "<div style='color:#ffd54a;font-size:15px'>", hesc(date), "</div></div>",
     map,
     sbFactionBar(w.regions),
+    sbRoster(w.court),
     "<div style='text-align:center;color:#8a7d63;font-size:12px;margin-top:6px'>陣中 ― 兵たちが蠢く（勢力の色は支配地に比例）</div>",
     "<canvas id='sbStage' width='520' height='150' style='width:100%;max-width:540px;height:auto;display:block;margin:4px auto 0;background:linear-gradient(#1c1811,#100e0a);border:1px solid #4a3f2f;border-radius:8px'></canvas>",
     panel("mini", "動静", sbLog(w.log)),
@@ -5215,20 +5370,25 @@ def viewSandbox(state) :=
     "</div>",
     pend,
     "<div style='margin-top:12px'>",
-    "<input id='gmInput' placeholder='劉邦として何をする? 例: 韓信を大将軍に任じ關中を突く' ",
-    "style='width:100%;padding:9px;background:#0f0d0a;border:1px solid #4a3f2f;color:#eee;border-radius:6px;box-sizing:border-box'/>",
-    "<div style='display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;color:#9a8d73;flex-wrap:wrap'>",
-    "<button id='gmLoadAI' class='btn btn-ghost' style='font-size:12px'>ブラウザAI軍師を起動（初回DL ~1GB・WebGPU）</button>",
-    "<span id='gmAiStatus'>未起動でもローカルで進行可</span>",
-    "</div>",
-    "<div style='display:flex;gap:8px;margin-top:8px;flex-wrap:wrap'>",
-    "<button id='gmSend' class='btn btn-primary'>行動する（AI 軍師）</button>",
-    button("primary", {tag: "sbSpecial"}, sbSpecialLabel(w.who)),
-    button("primary", {tag: "sbAdvance"}, "季を進める（静観）▶"),
-    "<button id='sbBattle' class='btn btn-ghost'>⚔ 会戦を見る</button>",
-    "<button id='sbAction' class='btn btn-primary'>🗡 出撃（アクション）</button>",
-    button("ghost", {tag: "toTitle"}, "タイトルへ"),
-    "</div></div></div>"
+    (if hasDrama then
+      sbDramaPanel(w.court.drama)
+    else sjoin([
+      "<input id='gmInput' placeholder='劉邦として何をする? 例: 韓信を大将軍に任じ關中を突く' ",
+      "style='width:100%;padding:9px;background:#0f0d0a;border:1px solid #4a3f2f;color:#eee;border-radius:6px;box-sizing:border-box'/>",
+      "<div style='display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;color:#9a8d73;flex-wrap:wrap'>",
+      "<button id='gmLoadAI' class='btn btn-ghost' style='font-size:12px'>ブラウザAI軍師を起動（初回DL ~1GB・WebGPU）</button>",
+      "<span id='gmAiStatus'>未起動でもローカルで進行可</span>",
+      "</div>",
+      "<div style='display:flex;gap:8px;margin-top:8px;flex-wrap:wrap'>",
+      "<button id='gmSend' class='btn btn-primary'>行動する（AI 軍師）</button>",
+      button("primary", {tag: "sbSpecial"}, sbSpecialLabel(w.who)),
+      button("primary", {tag: "sbAdvance"}, "季を進める（静観）▶"),
+      "<button id='sbBattle' class='btn btn-ghost'>⚔ 会戦を見る</button>",
+      "<button id='sbAction' class='btn btn-primary'>🗡 出撃（アクション）</button>",
+      "</div>"
+    ])),
+    "<div style='margin-top:10px'>", button("ghost", {tag: "toTitle"}, "タイトルへ"), "</div>",
+    "</div></div>"
   ])
 
 -- BGM for the current state — phase has priority over scene bg.
