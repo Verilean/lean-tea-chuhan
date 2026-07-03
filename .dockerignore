@@ -1,0 +1,6 @@
+.lake
+.git
+*.log
+.DS_Store
+Dockerfile
+render.yaml

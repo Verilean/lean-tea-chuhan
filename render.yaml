@@ -1,0 +1,22 @@
+# Render Blueprint — deploy the 楚漢恋歌 server as a Docker web service.
+# Push this repo to GitHub, then in Render: New → Blueprint → pick the repo.
+services:
+  - type: web
+    name: chuhan
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # The Lean build (toolchain + LeanTea + vendored sqlite) is heavy;
+    # a 512 MB free/starter instance can OOM at build time. Use a plan
+    # with >= 2 GB for the build. Downgrade the *runtime* later if idle
+    # memory allows.
+    plan: standard
+    healthCheckPath: /
+    autoDeploy: false
+    envVars:
+      # Optional — point these at any OpenAI-compatible endpoint to turn
+      # on the AI game master. Unset = fully playable on the offline
+      # event tables.
+      - key: LMSTUDIO_BASE_URL
+        sync: false
+      - key: LMSTUDIO_MODEL
+        sync: false
