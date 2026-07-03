@@ -509,7 +509,7 @@ private def openSaveDb : IO LeanTea.Sqlite.Db := do
   LeanTea.Sqlite.exec db "PRAGMA busy_timeout=3000;"
   return db
 
-/-- Create the saves table if missing. Run once at boot. -/
+/-- Create the tables if missing. Run once at boot. -/
 private def initSaveDb : IO Unit := do
   let db ← openSaveDb
   LeanTea.Sqlite.exec db
@@ -520,6 +520,18 @@ private def initSaveDb : IO Unit := do
        state      TEXT NOT NULL, \
        updated_at INTEGER NOT NULL, \
        PRIMARY KEY (save_key, slot));"
+  -- Leaderboard: one row per finished sandbox run.
+  LeanTea.Sqlite.exec db
+    "CREATE TABLE IF NOT EXISTS scores (\
+       id         INTEGER PRIMARY KEY AUTOINCREMENT, \
+       save_key   TEXT NOT NULL DEFAULT '', \
+       name       TEXT NOT NULL DEFAULT '', \
+       anchor     TEXT NOT NULL DEFAULT '', \
+       outcome    TEXT NOT NULL DEFAULT '', \
+       regions    INTEGER NOT NULL DEFAULT 0, \
+       year       INTEGER NOT NULL DEFAULT 0, \
+       score      INTEGER NOT NULL DEFAULT 0, \
+       created_at INTEGER NOT NULL);"
   LeanTea.Sqlite.close db
 
 /-- Parse `k=v&k2=v2` (query string, no `?`). Save codes and slot ids
@@ -592,6 +604,54 @@ private def handleSlots (req : Request) : IO Response := do
                 ("updated_at", Json.str (row[2]!))]
   return Response.json 200 (Json.mkObj [("slots", Json.arr items)])
 
+/-- A non-negative integer field (regions / year / score come as JSON
+    numbers; bound into SQL as their text form). -/
+private def jnatField (j : Json) (k : String) : Nat :=
+  ((j.getObjVal? k).toOption.bind (·.getNat?.toOption)).getD 0
+
+/-- `POST /api/score` — record one finished sandbox run for the board. -/
+private def handleScore (req : Request) : IO Response := do
+  match Json.parse (String.fromUTF8! req.body) with
+  | .error e => return Response.json 400 (Json.mkObj [("error", Json.str s!"bad json: {e}")])
+  | .ok j =>
+    let key := jstrField j "key"
+    let name := ((jstrField j "name").take 24).toString
+    let anchor := ((jstrField j "anchor").take 24).toString
+    let outcome := ((jstrField j "outcome").take 16).toString
+    let regions := jnatField j "regions"
+    let year := jnatField j "year"
+    let score := jnatField j "score"
+    let db ← openSaveDb
+    let _ ← LeanTea.Sqlite.execp db
+      "INSERT INTO scores (save_key, name, anchor, outcome, regions, year, score, created_at) \
+       VALUES (?, ?, ?, ?, ?, ?, ?, CAST(strftime('%s','now') AS INTEGER));"
+      #[key, name, anchor, outcome, toString regions, toString year, toString score]
+    LeanTea.Sqlite.close db
+    return Response.json 200 (Json.mkObj [("ok", Json.bool true)])
+
+/-- `GET /api/leaderboard?limit=&anchor=` — top runs by score. -/
+private def handleLeaderboard (req : Request) : IO Response := do
+  let limit := min (((queryParam req.query "limit").bind (·.toNat?)).getD 20) 100
+  let anchor := (queryParam req.query "anchor").getD ""
+  let db ← openSaveDb
+  let rows ← if anchor.isEmpty then
+      LeanTea.Sqlite.query db
+        "SELECT name, anchor, outcome, regions, year, score, created_at \
+         FROM scores ORDER BY score DESC, created_at DESC LIMIT ?;"
+        #[toString limit]
+    else
+      LeanTea.Sqlite.query db
+        "SELECT name, anchor, outcome, regions, year, score, created_at \
+         FROM scores WHERE anchor=? ORDER BY score DESC, created_at DESC LIMIT ?;"
+        #[anchor, toString limit]
+  LeanTea.Sqlite.close db
+  let items := rows.map fun r =>
+    Json.mkObj [("name", Json.str (r[0]!)), ("anchor", Json.str (r[1]!)),
+                ("outcome", Json.str (r[2]!)), ("regions", Json.str (r[3]!)),
+                ("year", Json.str (r[4]!)), ("score", Json.str (r[5]!)),
+                ("created_at", Json.str (r[6]!))]
+  return Response.json 200 (Json.mkObj [("scores", Json.arr items)])
+
 /-! ## Handler -/
 
 def handler (cfg : LeanTea.Llm.Openai.Config)
@@ -633,6 +693,8 @@ def handler (cfg : LeanTea.Llm.Openai.Config)
   | "/api/save", "POST" => handleSave req
   | "/api/load", "GET"  => handleLoad req
   | "/api/slots", "GET" => handleSlots req
+  | "/api/score", "POST" => handleScore req
+  | "/api/leaderboard", "GET" => handleLeaderboard req
   | "/favicon.ico", _ =>
     return { status := 204, headers := #[], body := .empty }
   | path, _ =>

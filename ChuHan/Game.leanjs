@@ -5118,6 +5118,24 @@ def sbEndState(state, world, outcome) := {
   mini: state.mini, llm: state.llm, resolve: state.resolve, world: world
 }
 
+-- ── 戦績スコア(ランキング用)────────────────────────────────────
+-- 支配領地数 × 100 + 結末ボーナス + 支配率合計。高いほど上位。
+def sbScore(world, outcome) :=
+  let pf := sbPlayerFaction(world.who);
+  let regions := sbCount(world.regions, pf, 0, 0);
+  let ctrl := sbCtrlSum(world.regions, pf, 0, 0);
+  let bonus := if outcome == "win" then 1000
+               else if outcome == "end" then 300
+               else if outcome == "rival" then 100
+               else 0;
+  regions * 100 + bonus + ctrl
+
+-- サーバへ送る戦績エントリ(runtime.js が key/name を足して POST)。
+def sbScoreEntry(world, outcome) :=
+  {anchor: world.who, outcome: outcome,
+   regions: sbCount(world.regions, sbPlayerFaction(world.who), 0, 0),
+   year: world.year, score: sbScore(world, outcome)}
+
 -- サンドボックスの一手を進めた後、終局なら終幕画面へ、さもなくば続行。
 def sbStep(state, world) :=
   let o := sbOutcome(world);
@@ -5130,8 +5148,9 @@ def viewSbEnd(state) :=
     "<h2 style='margin:0 0 12px'>", hesc(sbEndTitle(state.endingId)), "</h2>",
     "<p style='color:#d8cbb0;line-height:1.9'>", hesc(sbEndText(state.endingId, w.who)), "</p>",
     sbFactionBar(w.regions),
-    "<div style='display:flex;gap:10px;justify-content:center;margin-top:18px'>",
+    "<div style='display:flex;gap:10px;justify-content:center;margin-top:18px;flex-wrap:wrap'>",
     button("primary", {tag: "sbSetup"}, "もう一度"),
+    button("menu", {tag: "openLeaderboard"}, "🏆 戦績ランキング"),
     button("ghost", {tag: "toTitle"}, "タイトルへ"),
     "</div></div>"
   ])

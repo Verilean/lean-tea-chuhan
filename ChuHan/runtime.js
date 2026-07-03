@@ -108,6 +108,90 @@ function applySaveCodeFromInput() {
   else saveToast('コードの形式が不正です(英数4〜64文字)');
 }
 
+// ─── Leaderboard (戦績ランキング) — SQLite via /api/score|leaderboard ──
+// The score is game logic (sbScore in Game.leanjs); submission + the
+// ranking overlay are host glue. A finished sandbox run posts once.
+const playerNameKey = 'chuhan-playername';
+function getPlayerName() { return localStorage.getItem(playerNameKey) || '名もなき将'; }
+function setPlayerName(n) {
+  n = (n || '').trim().slice(0, 24);
+  if (n) localStorage.setItem(playerNameKey, n);
+  return getPlayerName();
+}
+function lbEscape(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function outcomeLabel(o) {
+  return o === 'win' ? '天下統一' : o === 'end' ? '時代の終焉'
+    : o === 'rival' ? '落日' : o === 'lose' ? '敗亡' : o;
+}
+let lastScoredEnd = '';   // dedup: a given run submits once
+async function submitScore() {
+  if (!state.world || typeof sbScoreEntry !== 'function') return;
+  const e = sbScoreEntry(state.world, state.endingId);
+  const dk = e.outcome + ':' + e.year + ':' + e.score;
+  if (dk === lastScoredEnd) return;   // already sent this end
+  lastScoredEnd = dk;
+  try {
+    await fetch('/api/score', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: getSaveCode(), name: getPlayerName(),
+        anchor: e.anchor, outcome: e.outcome, regions: e.regions, year: e.year, score: e.score })
+    });
+  } catch (_) { /* offline: skip */ }
+}
+function ensureLeaderboardOverlay() {
+  let ov = document.getElementById('lbOverlay');
+  if (ov) return ov;
+  ov = document.createElement('div');
+  ov.id = 'lbOverlay';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(0,0,0,0.88);display:none;align-items:center;justify-content:center';
+  ov.innerHTML =
+    "<div style='background:#1a1410;border:1px solid #4a3f2f;border-radius:10px;padding:20px;max-width:560px;width:92vw;max-height:86vh;overflow:auto;color:#f0e6d2'>" +
+    "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px'>" +
+    "<h2 style='margin:0;font-size:18px'>🏆 戦績ランキング</h2>" +
+    "<button id='lbClose' class='btn btn-ghost'>閉じる</button></div>" +
+    "<div style='margin-bottom:10px;font-size:12px;color:#c8b89a'>あなたの名: " +
+    "<input id='lbName' class='save-code-input' style='width:auto;display:inline-block' maxlength='24' /> " +
+    "<button id='lbNameSave' class='btn btn-menu'>更新</button></div>" +
+    "<div id='lbBody'>読み込み中…</div></div>";
+  document.body.appendChild(ov);
+  ov.querySelector('#lbClose').addEventListener('click', () => { ov.style.display = 'none'; });
+  ov.querySelector('#lbNameSave').addEventListener('click', () => {
+    setPlayerName((document.getElementById('lbName') || {}).value);
+    saveToast('名前を更新しました'); renderLeaderboardBody();
+  });
+  return ov;
+}
+async function renderLeaderboardBody() {
+  const body = document.getElementById('lbBody');
+  if (!body) return;
+  try {
+    const r = await fetch('/api/leaderboard?limit=20');
+    const scores = (await r.json()).scores || [];
+    if (!scores.length) { body.innerHTML = "<p style='color:#9a8d73'>まだ記録がありません。天下を競え。</p>"; return; }
+    const rows = scores.map((s, i) => {
+      const rank = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : (i + 1) + '.';
+      return "<tr>" +
+        "<td style='padding:3px 8px'>" + rank + "</td>" +
+        "<td style='padding:3px 8px'>" + lbEscape(s.name || '—') + "</td>" +
+        "<td style='padding:3px 8px'>" + lbEscape(s.anchor || '') + "</td>" +
+        "<td style='padding:3px 8px'>" + outcomeLabel(s.outcome) + "</td>" +
+        "<td style='padding:3px 8px;text-align:right'>" + s.regions + "地</td>" +
+        "<td style='padding:3px 8px;text-align:right;color:#ffd54a'>" + s.score + "</td></tr>";
+    }).join('');
+    body.innerHTML = "<table style='width:100%;border-collapse:collapse;font-size:13px'>" +
+      "<thead><tr style='color:#9a8d73;text-align:left'><th></th><th>名</th><th>主人公</th><th>結末</th><th>領地</th><th>点</th></tr></thead>" +
+      "<tbody>" + rows + "</tbody></table>";
+  } catch (_) { body.innerHTML = "<p style='color:#c66'>サーバに接続できません。</p>"; }
+}
+function openLeaderboard() {
+  const ov = ensureLeaderboardOverlay();
+  ov.style.display = 'flex';
+  const inp = document.getElementById('lbName'); if (inp) inp.value = getPlayerName();
+  renderLeaderboardBody();
+}
+
 // Checkpoint heuristic: snapshot just before a mini-game OR when a
 // new scene starts (chapter boundaries). The phase/sceneId pair acts
 // as the "interesting moment" marker.
@@ -1056,6 +1140,7 @@ stage.addEventListener('click', (e) => {
       if (sm) { sfxForButton(t); serverSaveSlot(+sm[1]); return; }
       if (lm) { sfxForButton(t); serverLoadSlot(+lm[1]); return; }
       if (msg.tag === 'applySaveCode') { sfxForButton(t); applySaveCodeFromInput(); return; }
+      if (msg.tag === 'openLeaderboard') { sfxForButton(t); openLeaderboard(); return; }
       const prevPhase = state.phase;
       sfxForButton(t);
       state = update(msg, state);
@@ -1063,6 +1148,9 @@ stage.addEventListener('click', (e) => {
       if (msg.tag === 'toggleSaveMenu' && state.flags && state.flags._saveMenuOpen) {
         refreshServerSlots().then(render);
       }
+      // A sandbox run just ended → record it on the leaderboard (once).
+      if (state.phase === 'sbEnd' && prevPhase !== 'sbEnd') submitScore();
+      if (prevPhase === 'sbEnd' && state.phase !== 'sbEnd') lastScoredEnd = '';
       // Chime once when a fresh ending unlocks.
       if (state.phase === 'ending' && prevPhase !== 'ending') {
         window.chuhanAudio && window.chuhanAudio.sfx('chime');
