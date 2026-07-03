@@ -506,6 +506,21 @@ def handler (cfg : LeanTea.Llm.Openai.Config)
   | "/game.js", _ =>
     let (gameJs, _) ← gameProv
     return Response.text 200 gameJs
+  | "/runtime.js", _ =>
+    -- Host runtime, extracted from page.html's inline script. Read fresh
+    -- per request (no boot cache) so edits show on reload without a
+    -- server restart. Classic script sharing scope with the game bundle.
+    let base ← chuhanDir
+    let full := base ++ "/runtime.js"
+    if ← System.FilePath.pathExists full then
+      let bytes ← IO.FS.readBinFile full
+      return {
+        status := 200,
+        headers := #[("content-type", "text/javascript; charset=utf-8"),
+                     ("cache-control", "no-cache")],
+        body := bytes
+      }
+    else return Response.notFound
   | "/api/ask", "POST" => handleAsk cfg req
   | "/api/resolve", "POST" => handleResolve cfg req
   | "/api/gm", "POST" => handleGm cfg req
@@ -582,7 +597,12 @@ def serveMain (args : List String) : IO Unit := do
   /- Asset audit: anything missing is loud (stderr + manifest file). -/
   let gameSrc ← ChuHan.loadSource
   let pageSrc ← IO.FS.readFile (base ++ "/page.html")
-  auditAssets gameSrc pageSrc (base ++ "/assets")
+  -- Runtime glue moved out of page.html; include it so /assets/ refs there
+  -- are still audited.
+  let runtimePath := base ++ "/runtime.js"
+  let runtimeSrc ← if ← System.FilePath.pathExists runtimePath
+                   then IO.FS.readFile runtimePath else pure ""
+  auditAssets gameSrc (pageSrc ++ "\n" ++ runtimeSrc) (base ++ "/assets")
               (base ++ "/MISSING_ASSETS.txt")
   /- Use `serveConcurrent` because /api/ask can block on the LLM for
      several seconds; while it's blocked the user may still navigate
