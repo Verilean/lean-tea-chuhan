@@ -3072,6 +3072,8 @@ def update(msg, state) :=
   | "sbAdvance" => sbStep(state, sbTick(state.world))
   | "dramaChoice" =>
     (if state.phase == "sandbox" then sbStep(state, sbResolveDrama(state.world, msg.choice)) else state)
+  | "expedition" =>
+    (if state.phase == "sandbox" then sbStep(state, sbExpedition(state.world, msg.target)) else state)
   | "sbSpecial" =>
     (if state.phase == "sandbox" then sbStep(state, sbSpecialResolve(state.world)) else state)
   | "sbActionResult" => (
@@ -4724,8 +4726,16 @@ def initRetainers(anchor) :=
     {name: "鍾離眜", loyalty: 66, ambition: 42, troops: 30, alive: true}
   ]
 
--- court: 功臣たち + 保留中のドラマ(dilemma)+ 粛清回数。
-def initCourt(anchor) := {retainers: initRetainers(anchor), drama: null, purges: 0}
+-- court: 功臣 + 保留中ドラマ + 粛清回数 + 兵站(兵糧)/名声/破滅フラグ。
+-- (court は world を貫通するので、遠征の状態もここに載せて再スレッドを避ける)
+def initCourt(anchor) :=
+  {retainers: initRetainers(anchor), drama: null, purges: 0,
+   supply: 60, fame: 0, doom: null}
+
+-- court の兵糧を d だけ増減(0 未満にはしない)。
+def sbCourtGainSupply(c, d) :=
+  {retainers: c.retainers, drama: c.drama, purges: c.purges,
+   supply: maxI(0, c.supply + d), fame: c.fame, doom: c.doom}
 
 -- 最も"危うい"功臣の index(野心+兵力-忠誠 が最大)。無ければ -1。
 def sbDangerIdx(rs, i, bestScore, bestI) :=
@@ -4803,6 +4813,70 @@ def sbCourtRevolt(rs, i) :=
      if r.alive && r.loyalty <= 0 && r.troops >= 40 then true
      else sbCourtRevolt(rs, i + 1))
   else false
+
+-- ── 遠征 × 兵站 ────────────────────────────────────────────────────
+-- 破天荒(世界の果てへ)を許すが、距離・兵糧・運が現実を突きつける。
+-- dist が難度(遠いほど兵糧要求と失敗率が跳ね上がる)。
+def sbFrontiers := [
+  {id: "xiongnu",  name: "匈奴",           dist: 2},
+  {id: "chaoxian", name: "朝鮮",           dist: 3},
+  {id: "nanyue",   name: "南越",           dist: 3},
+  {id: "xiyu",     name: "西域",           dist: 4},
+  {id: "wa",       name: "倭（日本）",     dist: 5},
+  {id: "yuezhi",   name: "大月氏",         dist: 6},
+  {id: "shendu",   name: "身毒（印度）",   dist: 7},
+  {id: "anxi",     name: "安息（波斯）",   dist: 8},
+  {id: "daqin",    name: "大秦・エジプト", dist: 10}
+]
+
+def sbFrontierAt(fs, id, i) :=
+  if i < arrLen(fs) then
+    (if arrGet(fs, i).id == id then arrGet(fs, i) else sbFrontierAt(fs, id, i + 1))
+  else arrGet(fs, 0)
+
+-- 結果の語り(tier 4 大成功 … 0 壊滅)。
+def sbExpeditionLine(name, tier) :=
+  if tier == 4 then
+    sconcat("🐎 遠征成る。", sconcat(name, "に旗を立てた。前人未到の地に漢の名が轟き、戦利品が糧道を潤した。"))
+  else if tier == 3 then
+    sconcat("🐎 遠征成功。", sconcat(name, "へ到達し、威を示して帰還した。その名は史に刻まれる。"))
+  else if tier == 2 then
+    sconcat("🐎 辛くも撤退。", sconcat(name, "の手前で兵糧が細り、深追いを断念した。損害は小さくない。"))
+  else if tier == 1 then
+    sconcat("🐎 兵站崩壊。", sconcat(name, "への道の半ば、糧道尽きて兵は飢え、隊列は崩れた。無謀の代償は重い。"))
+  else
+    sconcat("🐎 壊滅。", sconcat(name, "の砂と海に大軍が呑まれた。生きて還った者は、わずか。"))
+
+-- 遠征の解決。強さ(支配率合計)+運-距離-兵糧不足 で階層を決める。
+def sbExpedition(world, targetId) :=
+  let court := world.court;
+  let pf := sbPlayerFaction(world.who);
+  let f := sbFrontierAt(sbFrontiers, targetId, 0);
+  let dist := f.dist;
+  let strength := sbCtrlSum(world.regions, pf, 0, 0);
+  let need := dist * 20;
+  let shortfall := maxI(0, need - court.supply);
+  let luck := rngInt() % 60;
+  let margin := idiv(strength, 4) + luck - dist * 12 - shortfall;
+  let tier := if margin >= 45 then 4
+              else if margin >= 15 then 3
+              else if margin >= 0 - 20 then 2
+              else if margin >= 0 - 70 then 1
+              else 0;
+  let fameGain := if tier >= 3 then dist * 10 else if tier == 2 then dist * 4 else dist * 2;
+  let loot := if tier == 4 then dist * 8 else 0;
+  let supply2 := maxI(0, court.supply - need) + loot;
+  let mi := sbTopIdxOf(world.regions, pf, 0, -1, 0);
+  let regions2 := if tier >= 3 then world.regions
+                  else if tier == 2 then sbAdj(world.regions, mi, 0 - 8)
+                  else if tier == 1 then sbAdj(world.regions, mi, 0 - 20)
+                  else sbAdj(world.regions, mi, 0 - 35);
+  -- 壊滅かつ自国が細ければ、異郷で野望が果てる(遠征死)
+  let doom := if tier == 0 && strength < 120 then "exped" else court.doom;
+  let court2 := {retainers: court.retainers, drama: court.drama, purges: court.purges,
+                 supply: supply2, fame: court.fame + fameGain, doom: doom};
+  sbWorld(world.mode, sbNextYear(world.year, world.season), sbNextSeason(world.season),
+    world.loc, regions2, arrPush(world.log, sbExpeditionLine(f.name, tier)), 0, world.who, court2)
 
 -- ── 主人公アンカー ────────────────────────────────────────────────
 def sbAnchorLabel(anchor) :=
@@ -4997,7 +5071,8 @@ def sbEvent(world) :=
 
 def sbTick(world) :=
   let e := sbTickEvent(world);
-  let court2 := sbCourtTick(world.court, world);
+  -- 静観の間も国は少しずつ兵糧を蓄える。
+  let court2 := sbCourtGainSupply(sbCourtTick(world.court, world), 4);
   sbWorld(world.mode, sbNextYear(world.year, world.season),
     sbNextSeason(world.season), world.loc,
     e.regions, arrPush(world.log, e.line), 0, world.who, court2)
@@ -5164,8 +5239,8 @@ def sbLevy(world) :=
   let mi := sbTopIdxOf(regions, "han", 0, -1, 0);
   sbWorld(world.mode, sbNextYear(world.year, world.season), sbNextSeason(world.season),
     world.loc, sbAdj(regions, mi, 8),
-    arrPush(world.log, sconcat("募兵。", sconcat(arrGet(regions, mi).ja, "で壮丁が集まり、旗下が厚くなった。"))),
-    0, world.who, world.court)
+    arrPush(world.log, sconcat("募兵。", sconcat(arrGet(regions, mi).ja, "で壮丁と兵糧が集まり、旗下が厚くなった。"))),
+    0, world.who, sbCourtGainSupply(world.court, 20))
 
 def sbSpecialResolve(world) :=
   let a := sbAnchorId(world.who);
@@ -5185,8 +5260,9 @@ def sbOutcome(world) :=
   let ch := sbCount(regions, "han", 0, 0);
   let cc := sbCount(regions, "chu", 0, 0);
   let cq := sbCount(regions, "qin", 0, 0);
-  -- 内から滅ぶ:功臣の乱 / 粛清の果ての孤立(功臣のジレンマの帰結)
-  if sbCourtRevolt(world.court.retainers, 0) then "revolt"
+  -- 内から滅ぶ / 遠征の果て
+  if world.court.doom != null then "exped_doom"
+  else if sbCourtRevolt(world.court.retainers, 0) then "revolt"
   else if world.court.purges >= 3 then "purge_doom"
   else if cp >= 6 then "win"
   else if cp == 0 then "lose"
@@ -5202,6 +5278,7 @@ def sbEndTitle(o) :=
   else if o == "rival" then "落日"
   else if o == "revolt" then "功臣の乱"
   else if o == "purge_doom" then "孤立無援"
+  else if o == "exped_doom" then "遠征の果て"
   else "時代の終わり"
 
 def sbEndText(o, who) :=
@@ -5215,6 +5292,8 @@ def sbEndText(o, who) :=
     sconcat(who, "が最も頼りにした将が、ついに兵を返した。天下を共に取った刃が、いま己の喉元にある。――功臣は、飼い慣らせぬ。")
   else if o == "purge_doom" then
     sconcat(who, "は疑い、斬り、また斬った。脅威は消え――そして、誰も残らなかった。玉座の周りは、静かすぎるほど静かだ。")
+  else if o == "exped_doom" then
+    sconcat(who, "は世界の果てを望み、兵をそこへ導いた。だが天地は広く、糧道は細かった。異郷の砂に、その野望は還らぬ。――だが、そこまで行った者は、他にいない。")
   else
     sconcat("時は流れ、BCE 202 に至る。", sconcat(who, "の戦いはまだ終わらぬが、ひとつの時代は確かに幕を下ろした。"))
 
@@ -5235,7 +5314,8 @@ def sbScore(world, outcome) :=
                else if outcome == "end" then 300
                else if outcome == "rival" then 100
                else 0;
-  regions * 100 + bonus + ctrl
+  -- 名声(遠征で稼ぐ)も点になる。世界の果てへ挑めば、散っても伝説。
+  regions * 100 + bonus + ctrl + world.court.fame
 
 -- サーバへ送る戦績エントリ(runtime.js が key/name を足して POST)。
 def sbScoreEntry(world, outcome) :=
@@ -5335,6 +5415,25 @@ def sbDramaPanel(drama) :=
     button("primary", {tag: "dramaChoice", choice: "incite"}, "敵へ焚きつける"),
     "</div></div>"])
 
+-- ── 遠征パネル(世界の果てへ)──────────────────────────────────────
+def sbFrontierBtnLoop(fs, i, acc) :=
+  if i < arrLen(fs) then
+    (let f := arrGet(fs, i);
+     sbFrontierBtnLoop(fs, i + 1, sconcat(acc,
+       button("ghost", {tag: "expedition", target: f.id},
+         sconcat(f.name, sconcat("・難度", numStr(f.dist)))))))
+  else acc
+
+def sbExpPanel(court) :=
+  sjoin([
+    "<details style='margin-top:8px'>",
+    "<summary style='cursor:pointer;color:#c8b89a;font-size:13px'>🐎 遠征 ― 世界の果てへ（兵糧 ",
+    numStr(court.supply), " ／ 遠いほど無謀・兵站崩壊で破滅も）</summary>",
+    "<div style='display:flex;gap:6px;flex-wrap:wrap;margin-top:6px'>",
+    sbFrontierBtnLoop(sbFrontiers, 0, ""),
+    "</div></details>"
+  ])
+
 def viewSandbox(state) :=
   let w := state.world;
   let hasDrama := w.court.drama != null;
@@ -5356,6 +5455,8 @@ def viewSandbox(state) :=
     "<h2 style='margin:0'>群雄割拠 ― ", hesc(w.who),
     " <span style='font-size:11px;color:#888'>", hesc(modeBadge), " β</span></h2>",
     "<div style='color:#ffd54a;font-size:15px'>", hesc(date), "</div></div>",
+    "<div style='text-align:right;color:#9a8d73;font-size:11px;margin-top:2px'>兵糧 ",
+    numStr(w.court.supply), " ・ 名声 ", numStr(w.court.fame), "</div>",
     map,
     sbFactionBar(w.regions),
     sbRoster(w.court),
@@ -5385,7 +5486,8 @@ def viewSandbox(state) :=
       button("primary", {tag: "sbAdvance"}, "季を進める（静観）▶"),
       "<button id='sbBattle' class='btn btn-ghost'>⚔ 会戦を見る</button>",
       "<button id='sbAction' class='btn btn-primary'>🗡 出撃（アクション）</button>",
-      "</div>"
+      "</div>",
+      sbExpPanel(w.court)
     ])),
     "<div style='margin-top:10px'>", button("ghost", {tag: "toTitle"}, "タイトルへ"), "</div>",
     "</div></div>"
