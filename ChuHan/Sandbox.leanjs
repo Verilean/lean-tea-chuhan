@@ -787,13 +787,44 @@ def sbEvent(world) :=
     {regions: sbAdj(regions, ri, (if coin then 5 else -8)),
      line: sconcat("斥候曰く、", sconcat(sbAt(r), "の空気が張り詰めている。何かが、起きる前の静けさだ。"))}
 
+-- ── 双方向:世界が攻め返す(被侵攻)────────────────────────────────
+-- あなたが最も手薄な領地の index(自勢力・支配率最小)。無ければ -1。
+def sbWeakestOwnIdx(regions, pf, i, bestC, bestI) :=
+  if i < arrLen(regions) then
+    (let r := arrGet(regions, i);
+     if r.owner == pf && r.ctrl < bestC then sbWeakestOwnIdx(regions, pf, i + 1, r.ctrl, i)
+     else sbWeakestOwnIdx(regions, pf, i + 1, bestC, bestI))
+  else bestI
+
+-- 最強の敵勢力が、あなたの手薄な領地を突く。弱ければ旗が奪われる。
+def sbInvasion(regions, who) :=
+  let pf := sbPlayerFaction(who);
+  let mi := sbWeakestOwnIdx(regions, pf, 0, 999, 0 - 1);
+  if mi < 0 then {regions: regions, line: ""}
+  else
+    (let mr := arrGet(regions, mi);
+     let ei := sbTopEnemyIdx(regions, pf, 0, -1, 0);
+     let enemy := arrGet(regions, ei).owner;
+     let hit := 12 + rngInt() % 24;
+     let flip := (mr.ctrl - hit) <= 12;
+     let regions2 := if flip then sbOwn(regions, mi, enemy) else sbAdj(regions, mi, 0 - hit);
+     let line := if flip
+       then sconcat("⚑ ", sconcat(sbName(enemy), sconcat("が", sconcat(mr.ja, "を陥とした。旗が変わる――守勢に回れば、じり貧だ。"))))
+       else sconcat("⚑ ", sconcat(sbName(enemy), sconcat("が", sconcat(mr.ja, "を襲い、支配が揺らいだ。"))));
+     {regions: regions2, line: line})
+
 def sbTick(world) :=
   let e := sbTickEvent(world);
   -- 静観の間も国は少しずつ兵糧を蓄える。
   let court2 := sbCourtGainSupply(sbCourtTick(world.court, world), 4);
+  -- 双方向:一定確率で敵があなたの領地に攻め寄せる(一方的な征服にしない)
+  let inv := if rngInt() % 3 == 0 then sbInvasion(e.regions, world.who)
+             else {regions: e.regions, line: ""};
+  let log2 := if inv.line == "" then arrPush(world.log, e.line)
+              else arrPush(arrPush(world.log, e.line), inv.line);
   sbWorld(world.mode, sbNextYear(world.year, world.season),
     sbNextSeason(world.season), world.loc,
-    e.regions, arrPush(world.log, e.line), 0, world.who, court2)
+    inv.regions, log2, 0, world.who, court2)
 
 -- ── 会戦の解決(演出の裏で盤面を動かす)──────────────────────────
 def sbCtrlSum(regions, f, i, acc) :=
