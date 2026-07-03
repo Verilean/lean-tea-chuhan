@@ -29,6 +29,8 @@ extern js "(arr) => arr.join('')" sjoin
 extern js "() => Math.floor(Math.random() * 1000000)" rngInt
 extern js "(a, b) => a < b ? a : b" minI
 extern js "(a, b) => a > b ? a : b" maxI
+-- 正規表現テスト（最終ログの雰囲気判定などに使う。1 = 一致）。
+extern js "(s, re) => new RegExp(re).test(s) ? 1 : 0" reTest
 
 -- ── Save-slot extern bridge ────────────────────────────────────────
 -- Browser APIs we need extern access to for save/load logic that
@@ -4329,6 +4331,71 @@ def sbCount(regions, owner, i, acc) :=
     sbCount(regions, owner, i + 1,
       acc + (if arrGet(regions, i).owner == owner then 1 else 0))
   else acc
+
+-- ── page.html の描画グルーが呼ぶ純関数群 ──────────────────────────
+-- 雰囲気・情景・軍勢・群衆・効果音の「判定ロジック」をここに寄せる。
+-- こうすることで LeanJs のコンパイル（記法チェック）を通り、page.html
+-- には canvas / WebGPU / rAF などの命令的ホスト処理だけが残る。
+
+-- world.log の最終行（無ければ空文字）。
+def sbLastLog(world) :=
+  let n := arrLen(world.log);
+  if n > 0 then arrGet(world.log, n - 1) else ""
+
+-- 大気シェーダのモード: 0 平時 / 1 炎 / 2 砂塵 / 3 雪・飢饉。
+def sbAtmoMode(world) :=
+  let last := sbLastLog(world);
+  if reTest(last, "炎|焼|燃") == 1 then 1
+  else if reTest(last, "急襲|砂|嵐") == 1 then 2
+  else if world.season == 3 then 3
+  else if reTest(last, "雪|飢饉") == 1 then 3
+  else 0
+
+-- 情景画像生成のプロンプト。最終ログから場面を選ぶ。
+def sbSeasonEn(s) :=
+  if s == 0 then "spring" else if s == 1 then "summer"
+  else if s == 2 then "autumn" else "winter"
+
+def sbSceneEn(last) :=
+  if reTest(last, "炎|焼|燃") == 1 then "a burning palace at night, embers rising"
+  else if reTest(last, "急襲|砂|嵐") == 1 then "cavalry charging out of a sandstorm"
+  else if reTest(last, "雪|飢饉") == 1 then "a snowbound battlefield, gaunt refugees"
+  else if reTest(last, "宴|酒") == 1 then "a warlord feasting in a great tent"
+  else if reTest(last, "韓信|背水|渡") == 1 then "a lone general by a wide river at dawn"
+  else if reTest(last, "呂雉|書") == 1 then "a cold empress reading a letter by candlelight"
+  else "an ancient Chinese war camp, banners"
+
+def sbScenePrompt(world) :=
+  let scene := sbSceneEn(sbLastLog(world));
+  let season := sbSeasonEn(world.season);
+  sconcat("sumi-e ink wash painting, ",
+  sconcat(scene,
+  sconcat(", Chu-Han war era China 200 BCE, ",
+  sconcat(season,
+    ", muted ink tones, dramatic composition, cinematic, high detail"))))
+
+-- 軍勢の強さ: 当該勢力の全支配率合計（最低 20）。
+def sbArmyStrength(world, faction) :=
+  maxI(20, sbCtrlSum(world.regions, faction, 0, 0))
+
+-- 群衆シミュの目標人数（領地 1 つあたり約 3 人）。
+def sbTargetCounts(world) :=
+  {han:   sbCount(world.regions, "han",   0, 0) * 3,
+   chu:   sbCount(world.regions, "chu",   0, 0) * 3,
+   qin:   sbCount(world.regions, "qin",   0, 0) * 3,
+   lords: sbCount(world.regions, "lords", 0, 0) * 3}
+
+-- ボタン種別 → 効果音 ID。
+def sfxForKind(kind) :=
+  if kind == "primary" then "chime"
+  else if kind == "icon" then "page"
+  else if kind == "menu" then "page"
+  else if kind == "choice" then "page"
+  else if kind == "face" then "coin"
+  else if kind == "jade" then "drum"
+  else if kind == "card" then "coin"
+  else if kind == "char" then "chime"
+  else ""
 
 def sbWorld(mode, year, season, loc, regions, log, pending, who) :=
   {mode: mode, year: year, season: season, loc: loc,

@@ -790,18 +790,10 @@ function imgStatus(msg) {
   if (s) s.textContent = msg;
 }
 
+// scenePrompt logic now lives in Game.leanjs as sbScenePrompt(world) —
+// compiled by LeanJs. This is only the host-side null guard.
 function scenePrompt() {
-  const w = state.world;
-  const last = (w && w.log && w.log.length) ? w.log[w.log.length - 1] : '';
-  let scene = 'an ancient Chinese war camp, banners';
-  if (/炎|焼|燃/.test(last)) scene = 'a burning palace at night, embers rising';
-  else if (/急襲|砂|嵐/.test(last)) scene = 'cavalry charging out of a sandstorm';
-  else if (/雪|飢饉/.test(last)) scene = 'a snowbound battlefield, gaunt refugees';
-  else if (/宴|酒/.test(last)) scene = 'a warlord feasting in a great tent';
-  else if (/韓信|背水|渡/.test(last)) scene = 'a lone general by a wide river at dawn';
-  else if (/呂雉|書/.test(last)) scene = 'a cold empress reading a letter by candlelight';
-  const season = w ? ['spring','summer','autumn','winter'][w.season] : '';
-  return `sumi-e ink wash painting, ${scene}, Chu-Han war era China 200 BCE, ${season}, muted ink tones, dramatic composition, cinematic, high detail`;
+  return state.world ? sbScenePrompt(state.world) : '';
 }
 
 async function loadImgGen() {
@@ -895,10 +887,10 @@ struct VO { @builtin(position) pos:vec4f, @location(0) col:vec3f, @location(1) u
 
 let battle = { raf: null, render: null, starting: false };
 
+// armyStrength logic now lives in Game.leanjs as sbArmyStrength(world,
+// faction) — compiled by LeanJs. Host-side null guard only.
 function armyStrength(faction) {
-  const w = state.world; if (!w) return 20;
-  let s = 0; for (const r of w.regions) if (r.owner === faction) s += r.ctrl;
-  return Math.max(20, s);
+  return state.world ? sbArmyStrength(state.world, faction) : 20;
 }
 
 function battle2D(canvas, hanN, chuN) {
@@ -1076,14 +1068,8 @@ fn hash(p:vec2f)->f32 { return fract(sin(dot(p, vec2f(41.3,289.1)))*43758.5453);
 let atmo = { state: 'idle', render: null, raf: null, tried: false,
              canvas: null, gpu: null, gpuCtx: null, gpuCanvas: null };
 
-function sbAtmoMode() {
-  const w = state.world; if (!w) return 0;
-  const last = (w.log && w.log.length) ? w.log[w.log.length - 1] : '';
-  if (/炎|焼|燃/.test(last)) return 1;
-  if (/急襲|砂|嵐/.test(last)) return 2;
-  if (w.season === 3 || /雪|飢饉/.test(last)) return 3;
-  return 0;
-}
+// sbAtmoMode(world) now lives in Game.leanjs (compiled by LeanJs). The
+// atmosphere painters below call it with the live world + a null guard.
 
 // Canvas-2D fallback painter (always available). The painter reads the
 // LIVE canvas from atmo.canvas each frame rather than closing over one
@@ -1098,7 +1084,7 @@ function atmo2D() {
     const ctx = canvas.getContext('2d');
     const W = canvas.width, H = canvas.height;
     for (const p of parts) if (!p.init) { p.x *= W; p.y *= H; p.init = true; }
-    const m = sbAtmoMode();
+    const m = state.world ? sbAtmoMode(state.world) : 0;
     const g = ctx.createLinearGradient(0,0,0,H);
     if (m===1){ g.addColorStop(0,'#3a0d02'); g.addColorStop(1,'#c65214'); }
     else if (m===2){ g.addColorStop(0,'#5a4527'); g.addColorStop(1,'#3f3018'); }
@@ -1153,7 +1139,7 @@ async function atmoWebGPU() {
       ctx.configure({ device, format, alphaMode: 'opaque' });
       atmo.gpuCtx = ctx; atmo.gpuCanvas = canvas;
     }
-    device.queue.writeBuffer(ubuf, 0, new Float32Array([t, sbAtmoMode(), canvas.width, canvas.height]));
+    device.queue.writeBuffer(ubuf, 0, new Float32Array([t, state.world ? sbAtmoMode(state.world) : 0, canvas.width, canvas.height]));
     const enc = device.createCommandEncoder();
     const pass = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), clearValue: {r:0,g:0,b:0,a:1}, loadOp: 'clear', storeOp: 'store' }] });
     pass.setPipeline(pipe); pass.setBindGroup(0, bind); pass.draw(3); pass.end();
@@ -1206,11 +1192,10 @@ let sbSim = { agents: [], raf: null, w: 520, h: 150 };
 const SB_FCOL = { han: '#3b82f6', chu: '#ef4444', qin: '#9ca3af', lords: '#22c55e' };
 const SB_NOTABLE = { han: '韓信', chu: '項羽', qin: '子嬰', lords: '諸侯' };
 
-function sbTargetCounts() {
-  const w = state.world; const c = { han:0, chu:0, qin:0, lords:0 };
-  if (!w) return c;
-  for (const r of w.regions) c[r.owner] = (c[r.owner]||0) + 3;  // ~3 figures / region
-  return c;
+// sbTargetCounts(world) now lives in Game.leanjs (compiled by LeanJs);
+// host-side helper returns zeros when not in the sandbox.
+function sbTargets() {
+  return state.world ? sbTargetCounts(state.world) : { han:0, chu:0, qin:0, lords:0 };
 }
 function sbSpawn(faction) {
   return {
@@ -1224,7 +1209,7 @@ function sbSpawn(faction) {
   };
 }
 function sbRebalance() {
-  const target = sbTargetCounts();
+  const target = sbTargets();
   const have = { han:0, chu:0, qin:0, lords:0 };
   for (const a of sbSim.agents) if (!a.notable) have[a.faction]++;
   for (const f of ['han','chu','qin','lords']) {
@@ -1243,7 +1228,7 @@ function sbSeed() {
   sbSim.agents = [];
   sbRebalance();
   // A named notable per faction that actually holds ground.
-  const t = sbTargetCounts();
+  const t = sbTargets();
   for (const f of ['han','chu','qin','lords']) {
     if ((t[f]||0) > 0) {
       const a = sbSpawn(f); a.notable = true; a.label = SB_NOTABLE[f]; a.sp *= 0.6;
@@ -1549,21 +1534,14 @@ function wireResolveHandlers() {
 // Pick an SFX from a button's .btn-KIND class. One table, one place to
 // edit; adding a new button kind in Game.leanjs only needs an entry
 // here (and a CSS variant) — no per-msg.tag plumbing.
-const SFX_BY_KIND = {
-  primary: 'chime',
-  icon:    'page',
-  menu:    'page',
-  choice:  'page',
-  face:    'coin',
-  jade:    'drum',
-  card:    'coin',
-  char:    'chime',
-};
+// Button-kind → sfx-id mapping now lives in Game.leanjs as
+// sfxForKind(kind) (compiled by LeanJs). This stays host-side because it
+// walks the DOM element's classList.
 function sfxForButton(btn) {
   if (!btn || !window.chuhanAudio) return;
   for (const cls of btn.classList) {
     if (cls.startsWith('btn-')) {
-      const id = SFX_BY_KIND[cls.slice(4)];
+      const id = sfxForKind(cls.slice(4));
       if (id) { window.chuhanAudio.sfx(id); return; }
     }
   }
