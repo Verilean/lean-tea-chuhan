@@ -3064,6 +3064,8 @@ def update(msg, state) :=
                        battle: state.battle, endingId: "", toast: "" , mini: state.mini, llm: state.llm, resolve: state.resolve}
   | "sbStart" => sbStateWith(state, initWorldFor(msg.anchor, msg.mode))
   | "sbAdvance" => sbStep(state, sbTick(state.world))
+  | "battleResolve" =>
+    (if state.phase == "sandbox" then sbStep(state, sbBattleResolve(state.world)) else state)
   | "gmSubmit" => (
     let w := state.world;
     sbStateWith(state,
@@ -4512,6 +4514,53 @@ def sbTick(world) :=
   sbWorld(world.mode, sbNextYear(world.year, world.season),
     sbNextSeason(world.season), world.loc,
     e.regions, arrPush(world.log, e.line), 0, world.who)
+
+-- ── 会戦の解決(演出の裏で盤面を動かす)──────────────────────────
+def sbCtrlSum(regions, f, i, acc) :=
+  if i < arrLen(regions) then
+    sbCtrlSum(regions, f, i + 1,
+      acc + (if arrGet(regions, i).owner == f then arrGet(regions, i).ctrl else 0))
+  else acc
+
+-- 勢力 f が持つ最強地の index(無ければ 0)。
+def sbTopIdxOf(regions, f, i, bestC, bestI) :=
+  if i < arrLen(regions) then
+    (let r := arrGet(regions, i);
+     if r.owner == f then
+       (if r.ctrl > bestC then sbTopIdxOf(regions, f, i + 1, r.ctrl, i)
+        else sbTopIdxOf(regions, f, i + 1, bestC, bestI))
+     else sbTopIdxOf(regions, f, i + 1, bestC, bestI))
+  else bestI
+
+-- pf 以外の最強地の index(前線の標的)。
+def sbTopEnemyIdx(regions, pf, i, bestC, bestI) :=
+  if i < arrLen(regions) then
+    (let r := arrGet(regions, i);
+     if r.owner == pf then sbTopEnemyIdx(regions, pf, i + 1, bestC, bestI)
+     else (if r.ctrl > bestC then sbTopEnemyIdx(regions, pf, i + 1, r.ctrl, i)
+           else sbTopEnemyIdx(regions, pf, i + 1, bestC, bestI)))
+  else bestI
+
+def sbBattleResolve(world) :=
+  let regions := world.regions;
+  let pf := sbPlayerFaction(world.who);
+  let ei := sbTopEnemyIdx(regions, pf, 0, -1, 0);
+  let er := arrGet(regions, ei);
+  let myS := sbCtrlSum(regions, pf, 0, 0);
+  let enS := sbCtrlSum(regions, er.owner, 0, 0);
+  let win := (rngInt() % (myS + enS + 1)) < myS;
+  let regions2 := if win then sbOwn(regions, ei, pf)
+                  else sbAdj(regions, sbTopIdxOf(regions, pf, 0, -1, 0), -18);
+  let line := if win then
+                sconcat("⚔ 会戦。", sconcat(er.ja, sconcat("にて ",
+                  sconcat(sbName(pf), sconcat("軍が", sconcat(sbName(er.owner),
+                  "を破り、旗が変わった。"))))))
+              else
+                sconcat("⚔ 会戦。", sconcat(er.ja, sconcat("にて ",
+                  sconcat(sbName(pf), "軍は押し返された。損害は小さくない。"))));
+  sbWorld(world.mode, sbNextYear(world.year, world.season),
+    sbNextSeason(world.season), world.loc,
+    regions2, arrPush(world.log, line), 0, world.who)
 
 -- ── マップ描画(SVG 文字列)──────────────────────────────────────
 def sbRad(ctrl) := if ctrl > 70 then 7 else if ctrl > 40 then 5 else 4
