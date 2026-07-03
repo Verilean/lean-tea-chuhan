@@ -3063,7 +3063,9 @@ def update(msg, state) :=
                        stats: state.stats, flags: state.flags,
                        battle: state.battle, endingId: "", toast: "" , mini: state.mini, llm: state.llm, resolve: state.resolve}
   | "sbStart" => sbStateWith(state, initWorldFor(msg.anchor, msg.mode))
-  | "sbAdvance" => sbStateWith(state, sbTick(state.world))
+  | "sbAdvance" => sbStep(state, sbTick(state.world))
+  | "battleResolve" =>
+    (if state.phase == "sandbox" then sbStep(state, sbBattleResolve(state.world)) else state)
   | "gmSubmit" => (
     let w := state.world;
     sbStateWith(state,
@@ -3072,12 +3074,12 @@ def update(msg, state) :=
   | "gmResult" => (
     let w := state.world;
     let regions2 := sbApplyDeltas(w.regions, msg.deltas, 0);
-    sbStateWith(state,
+    sbStep(state,
       sbWorld(w.mode, sbNextYear(w.year, w.season), sbNextSeason(w.season),
         w.loc, regions2, arrPush(w.log, msg.narration), 0, w.who)))
   | "gmError" => (
     let w2 := sbTick(state.world);
-    sbStateWith(state,
+    sbStep(state,
       sbWorld(w2.mode, w2.year, w2.season, w2.loc, w2.regions,
         arrPush(w2.log, "（AI 不通ゆえ、天下は独りでに動いた）"), 0, w2.who)))
   | "toTitle" => { phase: "title", lang: state.lang,
@@ -4513,6 +4515,53 @@ def sbTick(world) :=
     sbNextSeason(world.season), world.loc,
     e.regions, arrPush(world.log, e.line), 0, world.who)
 
+-- ── 会戦の解決(演出の裏で盤面を動かす)──────────────────────────
+def sbCtrlSum(regions, f, i, acc) :=
+  if i < arrLen(regions) then
+    sbCtrlSum(regions, f, i + 1,
+      acc + (if arrGet(regions, i).owner == f then arrGet(regions, i).ctrl else 0))
+  else acc
+
+-- 勢力 f が持つ最強地の index(無ければ 0)。
+def sbTopIdxOf(regions, f, i, bestC, bestI) :=
+  if i < arrLen(regions) then
+    (let r := arrGet(regions, i);
+     if r.owner == f then
+       (if r.ctrl > bestC then sbTopIdxOf(regions, f, i + 1, r.ctrl, i)
+        else sbTopIdxOf(regions, f, i + 1, bestC, bestI))
+     else sbTopIdxOf(regions, f, i + 1, bestC, bestI))
+  else bestI
+
+-- pf 以外の最強地の index(前線の標的)。
+def sbTopEnemyIdx(regions, pf, i, bestC, bestI) :=
+  if i < arrLen(regions) then
+    (let r := arrGet(regions, i);
+     if r.owner == pf then sbTopEnemyIdx(regions, pf, i + 1, bestC, bestI)
+     else (if r.ctrl > bestC then sbTopEnemyIdx(regions, pf, i + 1, r.ctrl, i)
+           else sbTopEnemyIdx(regions, pf, i + 1, bestC, bestI)))
+  else bestI
+
+def sbBattleResolve(world) :=
+  let regions := world.regions;
+  let pf := sbPlayerFaction(world.who);
+  let ei := sbTopEnemyIdx(regions, pf, 0, -1, 0);
+  let er := arrGet(regions, ei);
+  let myS := sbCtrlSum(regions, pf, 0, 0);
+  let enS := sbCtrlSum(regions, er.owner, 0, 0);
+  let win := (rngInt() % (myS + enS + 1)) < myS;
+  let regions2 := if win then sbOwn(regions, ei, pf)
+                  else sbAdj(regions, sbTopIdxOf(regions, pf, 0, -1, 0), -18);
+  let line := if win then
+                sconcat("⚔ 会戦。", sconcat(er.ja, sconcat("にて ",
+                  sconcat(sbName(pf), sconcat("軍が", sconcat(sbName(er.owner),
+                  "を破り、旗が変わった。"))))))
+              else
+                sconcat("⚔ 会戦。", sconcat(er.ja, sconcat("にて ",
+                  sconcat(sbName(pf), "軍は押し返された。損害は小さくない。"))));
+  sbWorld(world.mode, sbNextYear(world.year, world.season),
+    sbNextSeason(world.season), world.loc,
+    regions2, arrPush(world.log, line), 0, world.who)
+
 -- ── マップ描画(SVG 文字列)──────────────────────────────────────
 def sbRad(ctrl) := if ctrl > 70 then 7 else if ctrl > 40 then 5 else 4
 
@@ -4566,6 +4615,66 @@ def sbLog(log) :=
   let n := arrLen(log);
   let stop := if n > 6 then n - 6 else 0;
   sbLogFrom(log, n - 1, stop, "")
+
+-- ── 勝敗・終了条件 ───────────────────────────────────────────────
+def sbPlayerFaction(who) := if who == "秦の遺臣" then "qin" else "han"
+
+-- "" = 続行 / "win" 天下統一 / "lose" 敗亡 / "rival" 他者統一 / "end" 時代の終わり
+def sbOutcome(world) :=
+  let regions := world.regions;
+  let pf := sbPlayerFaction(world.who);
+  let cp := sbCount(regions, pf, 0, 0);
+  let ch := sbCount(regions, "han", 0, 0);
+  let cc := sbCount(regions, "chu", 0, 0);
+  let cq := sbCount(regions, "qin", 0, 0);
+  if cp >= 6 then "win"
+  else if cp == 0 then "lose"
+  else if ch >= 6 then "rival"
+  else if cc >= 6 then "rival"
+  else if cq >= 6 then "rival"
+  else if world.year <= 202 then "end"
+  else ""
+
+def sbEndTitle(o) :=
+  if o == "win" then "天下統一"
+  else if o == "lose" then "敗亡"
+  else if o == "rival" then "落日"
+  else "時代の終わり"
+
+def sbEndText(o, who) :=
+  if o == "win" then
+    sconcat(who, "、天下を統べる。長い乱世は終わり、新たな秩序が始まる。……それが幸か不幸かは、まだ誰も知らない。")
+  else if o == "lose" then
+    sconcat(who, "、ここに敗れる。旗は倒れ、名は塵に紛れた。だが乱世は、次の誰かを待っている。")
+  else if o == "rival" then
+    "天下は他者の手に落ちた。あなたの物語は、正史の脚注に一行だけ残るだろう。"
+  else
+    sconcat("時は流れ、BCE 202 に至る。", sconcat(who, "の戦いはまだ終わらぬが、ひとつの時代は確かに幕を下ろした。"))
+
+def sbEndState(state, world, outcome) := {
+  phase: "sbEnd", lang: state.lang, char: "liubang",
+  sceneId: "", beat: 0, stats: state.stats, flags: state.flags,
+  battle: state.battle, endingId: outcome, toast: "",
+  mini: state.mini, llm: state.llm, resolve: state.resolve, world: world
+}
+
+-- サンドボックスの一手を進めた後、終局なら終幕画面へ、さもなくば続行。
+def sbStep(state, world) :=
+  let o := sbOutcome(world);
+  if o == "" then sbStateWith(state, world) else sbEndState(state, world, o)
+
+def viewSbEnd(state) :=
+  let w := state.world;
+  sjoin([
+    "<div style='max-width:520px;margin:0 auto;padding:32px 20px;text-align:center'>",
+    "<h2 style='margin:0 0 12px'>", hesc(sbEndTitle(state.endingId)), "</h2>",
+    "<p style='color:#d8cbb0;line-height:1.9'>", hesc(sbEndText(state.endingId, w.who)), "</p>",
+    sbFactionBar(w.regions),
+    "<div style='display:flex;gap:10px;justify-content:center;margin-top:18px'>",
+    button("primary", {tag: "sbSetup"}, "もう一度"),
+    button("ghost", {tag: "toTitle"}, "タイトルへ"),
+    "</div></div>"
+  ])
 
 -- ── アンカー選択画面 ─────────────────────────────────────────────
 def sbAnchorCard(anchor, title, desc) :=
@@ -4647,6 +4756,7 @@ def bgmForPhase(state) :=
   else if state.phase == "select" then "title"
   else if state.phase == "sandbox" then "court"
   else if state.phase == "sbSetup" then "title"
+  else if state.phase == "sbEnd" then "ending"
   else if state.phase == "gallery" then "title"
   else if state.phase == "ending" then "ending"
   else if state.phase == "battle" then "battle"
@@ -4674,6 +4784,7 @@ def viewByPhase(state) :=
   | "gallery"   => viewGallery(state)
   | "sbSetup"   => viewSbSetup(state)
   | "sandbox"   => viewSandbox(state)
+  | "sbEnd"     => viewSbEnd(state)
   | _ => viewTitle(state)
 
 def view(state) :=

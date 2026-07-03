@@ -897,6 +897,11 @@ function closeBattle() {
   if (ov) ov.style.display = 'none';
   if (battle.raf) { cancelAnimationFrame(battle.raf); battle.raf = null; }
   battle.render = null;
+  // The clash concludes → resolve it on the board (shifts the front).
+  if (state.phase === 'sandbox' && state.world) {
+    state = update({tag: 'battleResolve'}, state);
+    persist(state); render();
+  }
 }
 function wireBattle() {
   const b = document.getElementById('sbBattle');
