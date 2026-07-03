@@ -662,56 +662,13 @@ function wireAtmo() {
 // territory (flip a region and the mix visibly shifts). Purely
 // ephemeral animation state — never touches the pure `state`. ───────
 let sbSim = { agents: [], raf: null, w: 520, h: 150 };
-// Faction colours moved to Game.leanjs (sbColor); sbDrawFigure there
-// reads them. SB_NOTABLE stays — the sim wiring below tags notables.
-const SB_NOTABLE = { han: '韓信', chu: '項羽', qin: '子嬰', lords: '諸侯' };
-
-// sbTargetCounts(world) now lives in Game.leanjs (compiled by LeanJs);
-// host-side helper returns zeros when not in the sandbox.
-function sbTargets() {
-  return state.world ? sbTargetCounts(state.world) : { han:0, chu:0, qin:0, lords:0 };
-}
-function sbSpawn(faction) {
-  return {
-    x: Math.random() * sbSim.w,
-    y: 70 + Math.random() * 60,           // ground band (with depth)
-    dir: Math.random() < 0.5 ? -1 : 1,
-    sp: 0.2 + Math.random() * 0.5,
-    ph: Math.random() * 6.28,
-    faction: faction,
-    notable: false
-  };
-}
-function sbRebalance() {
-  const target = sbTargets();
-  const have = { han:0, chu:0, qin:0, lords:0 };
-  for (const a of sbSim.agents) if (!a.notable) have[a.faction]++;
-  for (const f of ['han','chu','qin','lords']) {
-    while (have[f] < (target[f]||0)) { sbSim.agents.push(sbSpawn(f)); have[f]++; }
-    // trim excess of this faction
-    if (have[f] > (target[f]||0)) {
-      let over = have[f] - target[f];
-      sbSim.agents = sbSim.agents.filter(a => {
-        if (over > 0 && !a.notable && a.faction === f) { over--; return false; }
-        return true;
-      });
-    }
-  }
-}
-function sbSeed() {
-  sbSim.agents = [];
-  sbRebalance();
-  // A named notable per faction that actually holds ground.
-  const t = sbTargets();
-  for (const f of ['han','chu','qin','lords']) {
-    if ((t[f]||0) > 0) {
-      const a = sbSpawn(f); a.notable = true; a.label = SB_NOTABLE[f]; a.sp *= 0.6;
-      sbSim.agents.push(a);
-    }
-  }
-}
-// sbDrawFigure(ctx, a) now lives in Game.leanjs (compiled by LeanJs,
-// using do / canvas externs). The crowd-sim loop below calls it.
+// Faction colours (sbColor), notable labels (sbNotableLabel), and target
+// counts (sbTargetCounts) all live in Game.leanjs now.
+// Crowd-sim roster (sbSpawn / sbRebalance / sbSeed), per-frame movement
+// (sbStepAgents), and the figure drawing (sbDrawFigure) all now live in
+// Game.leanjs (compiled by LeanJs: do / for / while / let mut, with the
+// canvas calls as thin externs). This host loop owns the live canvas,
+// the rAF tick, and the draw-order sort. sbSim.w is the stage width.
 function wireSandboxSim() {
   if (state.phase !== 'sandbox') {
     if (sbSim.raf !== null) { cancelAnimationFrame(sbSim.raf); sbSim.raf = null; }
@@ -719,7 +676,7 @@ function wireSandboxSim() {
     return;
   }
   if (!document.getElementById('sbStage')) return;
-  if (sbSim.agents.length === 0) sbSeed();
+  if (sbSim.agents.length === 0 && state.world) sbSim.agents = sbSeed(state.world, sbSim.w);
   if (sbSim.raf !== null) return;   // loop already running
   let frames = 0;
   function frame() {
@@ -733,20 +690,15 @@ function wireSandboxSim() {
     }
     const ctx = c.getContext('2d');
     frames++;
-    if (frames % 90 === 0) sbRebalance();   // track territory ~1.5s
+    // track territory ~1.5s; advance walk one frame (both compiled LeanJs)
+    if (frames % 90 === 0 && state.world) sbSim.agents = sbRebalance(sbSim.agents, state.world, sbSim.w);
+    sbSim.agents = sbStepAgents(sbSim.agents, c.width);
     ctx.clearRect(0, 0, c.width, c.height);
     // ground line
     ctx.strokeStyle = '#2a2318'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(0, 68); ctx.lineTo(c.width, 68); ctx.stroke();
     // sort by y so nearer figures draw on top
     const drawn = sbSim.agents.slice().sort((p, q) => p.y - q.y);
-    for (const a of sbSim.agents) {
-      a.ph += 0.12;
-      a.x += a.dir * a.sp;
-      if (a.x < 6) { a.x = 6; a.dir = 1; }
-      if (a.x > c.width - 6) { a.x = c.width - 6; a.dir = -1; }
-      if (Math.random() < 0.006) a.dir *= -1;      // random turn
-    }
     for (const a of drawn) sbDrawFigure(ctx, a);
     sbSim.raf = requestAnimationFrame(frame);
   }
