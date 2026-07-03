@@ -39,6 +39,10 @@ extern js "(s, re) => new RegExp(re).test(s) ? 1 : 0" reTest
 extern js "(key) => { try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (_) { return null; } }" lsLoad
 extern js "(key, v) => { try { localStorage.setItem(key, JSON.stringify(v)); } catch (_) {} }" lsSave
 extern js "(key) => { try { localStorage.removeItem(key); } catch (_) {} }" lsRemove
+-- Server-backed save slots (SQLite): the label cache + save code are
+-- maintained by runtime.js; the menu view reads them through these.
+extern js "(n) => (typeof window !== 'undefined' && window.chuhanSlotLabel) ? window.chuhanSlotLabel(n) : '…'" serverSlotLabel
+extern js "() => (typeof window !== 'undefined' && window.chuhanGetSaveCode) ? window.chuhanGetSaveCode() : '----'" getSaveCodeStr
 
 -- Ending tracker (for the gallery / trophies). Stores a flat object
 -- of {endingId: timestamp} in localStorage 'chuhan-endings'.
@@ -3670,9 +3674,11 @@ def renderSaveMenuItem(action, label) :=
 def renderSaveMenu(state) :=
   let open := state.flags._saveMenuOpen == true;
   let openClass := if open then "save-menu open" else "save-menu";
-  let s1 := describeState(lsLoad(lsKeySlot(1)));
-  let s2 := describeState(lsLoad(lsKeySlot(2)));
-  let s3 := describeState(lsLoad(lsKeySlot(3)));
+  -- Slot previews come from the server (via runtime.js's cache); the
+  -- checkpoint stays local (autosave is client-side).
+  let s1 := serverSlotLabel(1);
+  let s2 := serverSlotLabel(2);
+  let s3 := serverSlotLabel(3);
   let cp := describeState(lsLoad(lsKeyCheckpoint));
   sjoin([
     "<div class='", openClass, "'>",
@@ -3688,6 +3694,12 @@ def renderSaveMenu(state) :=
     "<hr>",
     renderSaveMenuItem("loadCheckpoint", sjoin(["↩ チェックポイント: ", cp])),
     renderSaveMenuItem("restart", "⟲ 最初からやり直す"),
+    "<hr>",
+    "<div class='save-code'>セーブコード: <b>", getSaveCodeStr(), "</b>",
+    "<div class='save-code-hint'>別端末で下に入力すると同じセーブを復元できます</div>",
+    "<input id='saveCodeInput' class='save-code-input' placeholder='コードを入力' />",
+    button("menu", {tag: "applySaveCode"}, "このコードで復元"),
+    "</div>",
     "</div></div>"
   ])
 

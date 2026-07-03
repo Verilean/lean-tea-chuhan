@@ -30,6 +30,84 @@ function saveTo(key, state) {
 function loadSave() { return loadFrom(lsKey); }
 function persist(state) { saveTo(lsKey, state); }
 
+// ─── Server-backed save slots (SQLite via /api/save|load|slots) ──────
+// Autosave stays in localStorage (above). Named slots go to the server,
+// keyed by a client-generated "save code" so the same slots can be
+// restored on another device by entering the code. All host glue — the
+// game logic never sees the network.
+const saveCodeKey = 'chuhan-savecode';
+const codeRe = /^[A-Za-z0-9_-]{4,64}$/;
+function getSaveCode() {
+  let c = localStorage.getItem(saveCodeKey);
+  if (!c || !codeRe.test(c)) {
+    const r = () => Math.random().toString(36).slice(2, 8).toUpperCase();
+    c = (r() + r()).slice(0, 10);
+    localStorage.setItem(saveCodeKey, c);
+  }
+  return c;
+}
+function setSaveCode(c) {
+  c = (c || '').trim();
+  if (!codeRe.test(c)) return false;
+  localStorage.setItem(saveCodeKey, c);
+  return true;
+}
+// Expose to Game.leanjs's menu view (serverSlotLabel / getSaveCodeStr).
+window.chuhanGetSaveCode = getSaveCode;
+let serverSlots = {};                       // {slot: {label, updated_at}}
+window.chuhanSlotLabel = function (n) {
+  const s = serverSlots[String(n)];
+  if (!s) return '空き';
+  const when = new Date(Number(s.updated_at) * 1000).toLocaleString();
+  return (s.label || '記録') + ' — ' + when;
+};
+async function refreshServerSlots() {
+  try {
+    const r = await fetch('/api/slots?key=' + encodeURIComponent(getSaveCode()));
+    const j = await r.json();
+    serverSlots = {};
+    for (const s of (j.slots || [])) serverSlots[String(s.slot)] = s;
+  } catch (_) { /* offline: keep last cache */ }
+}
+function saveToast(msg) {
+  let el = document.getElementById('saveToast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'saveToast';
+    el.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:2000;background:#1b1710ee;color:#f0e6d2;border:1px solid #4a3f2f;border-radius:8px;padding:8px 14px;font-size:13px;transition:opacity .3s';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg; el.style.opacity = '1';
+  clearTimeout(el._t); el._t = setTimeout(() => { el.style.opacity = '0'; }, 1800);
+}
+async function serverSaveSlot(n) {
+  try {
+    const label = (typeof describeState === 'function') ? describeState(state) : '';
+    const r = await fetch('/api/save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: getSaveCode(), slot: String(n), label, state })
+    });
+    if (r.ok) { saveToast('スロット' + n + ' に保存しました'); await refreshServerSlots(); render(); }
+    else saveToast('保存に失敗しました');
+  } catch (_) { saveToast('サーバに接続できません(保存不可)'); }
+}
+async function serverLoadSlot(n) {
+  try {
+    const r = await fetch('/api/load?key=' + encodeURIComponent(getSaveCode()) + '&slot=' + n);
+    if (r.status === 404) { saveToast('スロット' + n + ' は空です'); return; }
+    if (!r.ok) { saveToast('読み込みに失敗しました'); return; }
+    const j = await r.json();
+    if (j && j.state) { state = j.state; persist(state); render(); saveToast('スロット' + n + ' をロードしました'); }
+  } catch (_) { saveToast('サーバに接続できません(読込不可)'); }
+}
+// Restore another device's slots by switching to its save code.
+function applySaveCodeFromInput() {
+  const inp = document.getElementById('saveCodeInput');
+  const v = inp ? inp.value : '';
+  if (setSaveCode(v)) { saveToast('コードを ' + getSaveCode() + ' に切替'); refreshServerSlots().then(render); }
+  else saveToast('コードの形式が不正です(英数4〜64文字)');
+}
+
 // Checkpoint heuristic: snapshot just before a mini-game OR when a
 // new scene starts (chapter boundaries). The phase/sceneId pair acts
 // as the "interesting moment" marker.
@@ -971,9 +1049,20 @@ stage.addEventListener('click', (e) => {
   while (t && t !== stage) {
     if (t.dataset && t.dataset.msg) {
       const msg = JSON.parse(t.dataset.msg);
+      // Server-backed save slots + save-code entry are async host actions;
+      // handle them here and skip the pure update() path.
+      const sm = /^saveSlot([123])$/.exec(msg.tag || '');
+      const lm = /^loadSlot([123])$/.exec(msg.tag || '');
+      if (sm) { sfxForButton(t); serverSaveSlot(+sm[1]); return; }
+      if (lm) { sfxForButton(t); serverLoadSlot(+lm[1]); return; }
+      if (msg.tag === 'applySaveCode') { sfxForButton(t); applySaveCodeFromInput(); return; }
       const prevPhase = state.phase;
       sfxForButton(t);
       state = update(msg, state);
+      // Opening the save menu → refresh slot previews from the server.
+      if (msg.tag === 'toggleSaveMenu' && state.flags && state.flags._saveMenuOpen) {
+        refreshServerSlots().then(render);
+      }
       // Chime once when a fresh ending unlocks.
       if (state.phase === 'ending' && prevPhase !== 'ending') {
         window.chuhanAudio && window.chuhanAudio.sfx('chime');
