@@ -2,6 +2,7 @@ import LeanTea
 import LeanTea.Persist.Sqlite
 import LeanJs.Parser
 import LeanJs.Codegen
+import LeanJs.Includes
 import ChuHan.Game
 
 /-! # chuhan_serve — 楚漢恋歌 SPA + LLM TRPG backend
@@ -27,13 +28,19 @@ open Lean (Json)
 namespace ChuHanServe
 
 def compileGame : IO (String × Bool) := do
-  let src ← ChuHan.loadSource
+  let (src, path) ← ChuHan.loadSourceAt
   match Parser.parseProgramString src with
   | .error e => return (s!"throw new Error({String.quote e});", true)
-  | .ok p    =>
-    match Codegen.compileChecked p with
-    | .error e => return (s!"throw new Error({String.quote s!"LeanJs check: {e}"});", true)
-    | .ok js   => return (js, false)
+  | .ok p0   =>
+    try
+      -- Splice `include "…"` files (Story.leanjs / Sandbox.leanjs) before
+      -- checking + codegen, so the game can live across several files.
+      let p ← LeanJs.Includes.resolve path p0
+      match Codegen.compileChecked p with
+      | .error e => return (s!"throw new Error({String.quote s!"LeanJs check: {e}"});", true)
+      | .ok js   => return (js, false)
+    catch e =>
+      return (s!"throw new Error({String.quote s!"include: {e}"});", true)
 
 /-! ## Asset audit
 
@@ -765,8 +772,14 @@ def serveMain (args : List String) : IO Unit := do
   let modeNote := if a.dev then "  [DEV: hot reload]" else ""
   IO.println s!"chuhan server: http://{a.host}:{a.port}/{modeNote}"
   IO.println s!"  LLM backend: {baseUrl}"
-  /- Asset audit: anything missing is loud (stderr + manifest file). -/
-  let gameSrc ← ChuHan.loadSource
+  /- Asset audit: anything missing is loud (stderr + manifest file).
+     Read every game source file (the game is split across Game/Story/
+     Sandbox .leanjs) so portrait refs in any of them are audited. -/
+  let mut gameSrc := ""
+  for f in ["Game.leanjs", "Story.leanjs", "Sandbox.leanjs"] do
+    let fp := base ++ "/" ++ f
+    if ← System.FilePath.pathExists fp then
+      gameSrc := gameSrc ++ "\n" ++ (← IO.FS.readFile fp)
   let pageSrc ← IO.FS.readFile (base ++ "/page.html")
   -- Runtime glue moved out of page.html; include it so /assets/ refs there
   -- are still audited.
