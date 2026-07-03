@@ -645,6 +645,99 @@ function render() {
   wireSandboxSim();
   wireAtmo();
   wireBattle();
+  wireImgGen();
+}
+
+// ─── In-browser scene illustration (SD-Turbo via diffusers.js / WebGPU).
+// Optional, opt-in, cached, non-blocking. A 1-step distilled diffusion
+// model paints the current situation in an ink-wash style. No server,
+// no cost — same static/Steam story as the browser LLM. If WebGPU is
+// absent or anything throws, we just skip it: the shader/SVG/sim
+// visuals carry the scene regardless.
+//
+// TUNE ON A REAL WEBGPU BROWSER: the exact ONNX repo id and diffusers.js
+// run() params below are the two things most likely to need adjusting;
+// they're isolated as constants for that reason.
+const IMG_MODEL = 'aislamov/sd-turbo-onnx';   // ← SD-Turbo ONNX for diffusers.js
+const IMG_STEPS = 1;                          // SD-Turbo is 1-step
+let imggen = { mod: null, pipe: null, ready: false, loading: false, busy: false };
+
+function imgStatus(msg) {
+  const s = document.getElementById('imgStatus');
+  if (s) s.textContent = msg;
+}
+
+function scenePrompt() {
+  const w = state.world;
+  const last = (w && w.log && w.log.length) ? w.log[w.log.length - 1] : '';
+  let scene = 'an ancient Chinese war camp, banners';
+  if (/炎|焼|燃/.test(last)) scene = 'a burning palace at night, embers rising';
+  else if (/急襲|砂|嵐/.test(last)) scene = 'cavalry charging out of a sandstorm';
+  else if (/雪|飢饉/.test(last)) scene = 'a snowbound battlefield, gaunt refugees';
+  else if (/宴|酒/.test(last)) scene = 'a warlord feasting in a great tent';
+  else if (/韓信|背水|渡/.test(last)) scene = 'a lone general by a wide river at dawn';
+  else if (/呂雉|書/.test(last)) scene = 'a cold empress reading a letter by candlelight';
+  const season = w ? ['spring','summer','autumn','winter'][w.season] : '';
+  return `sumi-e ink wash painting, ${scene}, Chu-Han war era China 200 BCE, ${season}, muted ink tones, dramatic composition, cinematic, high detail`;
+}
+
+async function loadImgGen() {
+  if (imggen.ready || imggen.loading) return false;
+  if (!navigator.gpu) { imgStatus('この端末は WebGPU 非対応（絵はスキップ）'); return false; }
+  imggen.loading = true;
+  imgStatus('画家（SD-Turbo）を読み込み中…（初回のみ大きめDL・以後キャッシュ）');
+  try {
+    if (!imggen.mod) imggen.mod = await import('https://esm.run/@aislamov/diffusers.js');
+    imggen.pipe = await imggen.mod.DiffusionPipeline.fromPretrained(IMG_MODEL, {
+      progressCallback: (p) => imgStatus('画家 読み込み: ' + (p && p.status ? p.status : '…'))
+    });
+    imggen.ready = true;
+    imgStatus('画家 起動済み');
+    return true;
+  } catch (e) {
+    imgStatus('画家 起動失敗: ' + (e && e.message ? e.message : e) + '（絵はスキップ、進行は継続）');
+    return false;
+  } finally {
+    imggen.loading = false;
+  }
+}
+
+async function genScene() {
+  if (imggen.busy) return;
+  if (!imggen.ready) { const ok = await loadImgGen(); if (!ok) return; }
+  imggen.busy = true;
+  imgStatus('筆を執っている…');
+  try {
+    const canvas = document.getElementById('sbScene');
+    const images = await imggen.pipe.run({
+      prompt: scenePrompt(),
+      numInferenceSteps: IMG_STEPS,
+      guidanceScale: 0,
+      progressCallback: (info) => { if (info && info.step != null) imgStatus('描画 ' + info.step + '/' + IMG_STEPS); }
+    });
+    const img = Array.isArray(images) ? images[0] : images;
+    // diffusers.js tensors expose toImageData(); fall back to any canvas the lib returns.
+    if (canvas && img && img.toImageData) {
+      const data = await img.toImageData();
+      canvas.width = data.width; canvas.height = data.height;
+      canvas.getContext('2d').putImageData(data, 0, 0);
+      canvas.style.display = 'block';
+      imgStatus('（情景 更新）');
+    } else {
+      imgStatus('画像の取り出しに失敗（実機で run() の戻り値を要確認）');
+    }
+  } catch (e) {
+    imgStatus('描画失敗: ' + (e && e.message ? e.message : e));
+  } finally {
+    imggen.busy = false;
+  }
+}
+
+function wireImgGen() {
+  const b = document.getElementById('imgGen');
+  if (!b || b.dataset.wired) return;
+  b.dataset.wired = '1';
+  b.addEventListener('click', genScene);
 }
 
 // ─── #3 · Mass-battle showpiece. A ⚔ button opens a fullscreen overlay
