@@ -931,7 +931,8 @@ function battle2D(canvas, hanN, chuN) {
 
 async function battleWebGPU(canvas, hanN, chuN) {
   if (!navigator.gpu) return null;
-  const adapter = await navigator.gpu.requestAdapter(); if (!adapter) return null;
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter || adapter.isFallbackAdapter) return null;   // software GPU → use 2D fallback
   const device = await adapter.requestDevice();
   const ctx = canvas.getContext('webgpu'); if (!ctx) return null;
   const format = navigator.gpu.getPreferredCanvasFormat();
@@ -970,7 +971,8 @@ async function battleWebGPU(canvas, hanN, chuN) {
     device.queue.writeBuffer(ubuf, 0, new Float32Array([t, canvas.width, canvas.height, Math.min(t/6, 1)]));
     const enc = device.createCommandEncoder();
     const pass = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), clearValue: {r:0.05,g:0.043,b:0.03,a:1}, loadOp: 'clear', storeOp: 'store' }] });
-    pass.setPipeline(pipe); pass.setVertexBuffer(0, qbuf); pass.setVertexBuffer(1, ibuf);
+    pass.setPipeline(pipe); pass.setBindGroup(0, bind);
+    pass.setVertexBuffer(0, qbuf); pass.setVertexBuffer(1, ibuf);
     pass.draw(6, total); pass.end();
     device.queue.submit([enc.finish()]);
   };
@@ -1071,7 +1073,8 @@ fn hash(p:vec2f)->f32 { return fract(sin(dot(p, vec2f(41.3,289.1)))*43758.5453);
   return vec4f(col, 1.0);
 }`;
 
-let atmo = { state: 'idle', render: null, raf: null, tried: false };
+let atmo = { state: 'idle', render: null, raf: null, tried: false,
+             canvas: null, gpu: null, gpuCtx: null, gpuCanvas: null };
 
 function sbAtmoMode() {
   const w = state.world; if (!w) return 0;
@@ -1082,14 +1085,19 @@ function sbAtmoMode() {
   return 0;
 }
 
-// Canvas-2D fallback painter (always available).
-function atmo2D(canvas) {
-  const ctx = canvas.getContext('2d');
-  const W = canvas.width, H = canvas.height;
+// Canvas-2D fallback painter (always available). The painter reads the
+// LIVE canvas from atmo.canvas each frame rather than closing over one
+// element: every sandbox re-render rebuilds stage.innerHTML and replaces
+// #sbAtmo, so a captured element would go stale (blank on screen).
+function atmo2D() {
   const parts = Array.from({length: 60}, () => ({
-    x: Math.random()*W, y: Math.random()*H, s: Math.random()*2+0.5, v: Math.random()*0.5+0.2
+    x: Math.random(), y: Math.random(), s: Math.random()*2+0.5, v: Math.random()*0.5+0.2, init: false
   }));
   return (t) => {
+    const canvas = atmo.canvas; if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    for (const p of parts) if (!p.init) { p.x *= W; p.y *= H; p.init = true; }
     const m = sbAtmoMode();
     const g = ctx.createLinearGradient(0,0,0,H);
     if (m===1){ g.addColorStop(0,'#3a0d02'); g.addColorStop(1,'#c65214'); }
@@ -1107,32 +1115,48 @@ function atmo2D(canvas) {
   };
 }
 
-async function atmoWebGPU(canvas) {
+async function atmoWebGPU() {
   if (!navigator.gpu) return null;
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) return null;
-  const device = await adapter.requestDevice();
-  const ctx = canvas.getContext('webgpu');
-  if (!ctx) return null;
-  const format = navigator.gpu.getPreferredCanvasFormat();
-  ctx.configure({ device, format, alphaMode: 'opaque' });
-  device.pushErrorScope('validation');
-  const mod = device.createShaderModule({ code: ATMO_WGSL });
-  const pipe = device.createRenderPipeline({
-    layout: 'auto',
-    vertex: { module: mod, entryPoint: 'vs' },
-    fragment: { module: mod, entryPoint: 'fs', targets: [{ format }] },
-    primitive: { topology: 'triangle-list' }
-  });
-  const err = await device.popErrorScope();
-  if (err) return null;   // WGSL/pipeline invalid → caller uses 2D
-  const ubuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const bind = device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubuf } }] });
+  // Build device + pipeline once and cache them; only the canvas context
+  // is per-element and gets (re)configured inside the render closure when
+  // a re-render swaps #sbAtmo for a fresh canvas.
+  if (!atmo.gpu) {
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    // A software/fallback adapter (SwiftShader) reports success but often
+    // renders black; use the Canvas-2D path there instead.
+    if (!adapter || adapter.isFallbackAdapter) return null;
+    const device = await adapter.requestDevice();
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    device.pushErrorScope('validation');
+    const mod = device.createShaderModule({ code: ATMO_WGSL });
+    const pipe = device.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module: mod, entryPoint: 'vs' },
+      fragment: { module: mod, entryPoint: 'fs', targets: [{ format }] },
+      primitive: { topology: 'triangle-list' }
+    });
+    const err = await device.popErrorScope();
+    if (err) return null;   // WGSL/pipeline invalid → caller uses 2D
+    const ubuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const bind = device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubuf } }] });
+    atmo.gpu = { device, format, pipe, ubuf, bind };
+  }
+  const { device, format, pipe, ubuf, bind } = atmo.gpu;
   return (t) => {
+    const canvas = atmo.canvas; if (!canvas) return;
+    // Re-getContext + reconfigure whenever the live canvas element differs
+    // from the one we last configured (i.e. after a sandbox re-render).
+    let ctx = atmo.gpuCtx;
+    if (atmo.gpuCanvas !== canvas || !ctx) {
+      ctx = canvas.getContext('webgpu');
+      if (!ctx) return;
+      ctx.configure({ device, format, alphaMode: 'opaque' });
+      atmo.gpuCtx = ctx; atmo.gpuCanvas = canvas;
+    }
     device.queue.writeBuffer(ubuf, 0, new Float32Array([t, sbAtmoMode(), canvas.width, canvas.height]));
     const enc = device.createCommandEncoder();
     const pass = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), clearValue: {r:0,g:0,b:0,a:1}, loadOp: 'clear', storeOp: 'store' }] });
-    pass.setPipeline(pipe); pass.draw(3); pass.end();
+    pass.setPipeline(pipe); pass.setBindGroup(0, bind); pass.draw(3); pass.end();
     device.queue.submit([enc.finish()]);
   };
 }
@@ -1142,6 +1166,9 @@ function atmoStartLoop() {
   const frame = () => {
     const c = document.getElementById('sbAtmo');
     if (state.phase !== 'sandbox' || !c || !atmo.render) { atmo.raf = null; atmo.state = 'idle'; return; }
+    // Publish the live canvas so the painter (2D or WebGPU) always draws to
+    // the element currently in the DOM, even after a re-render swapped it.
+    atmo.canvas = c;
     atmo.render((performance.now() - t0) / 1000);
     atmo.raf = requestAnimationFrame(frame);
   };
@@ -1152,18 +1179,20 @@ function wireAtmo() {
   const c = document.getElementById('sbAtmo');
   if (state.phase !== 'sandbox' || !c) {
     if (atmo.raf) { cancelAnimationFrame(atmo.raf); atmo.raf = null; }
-    atmo.state = 'idle';
+    atmo.state = 'idle'; atmo.canvas = null;
     return;
   }
+  // The painter re-acquires the live canvas each frame, so a single running
+  // loop survives re-renders — no need to re-init when #sbAtmo is swapped.
   if (atmo.state === 'running' && atmo.raf) return;
   if (atmo.state === 'starting') return;
-  atmo.state = 'starting';
-  const begin2D = () => { atmo.render = atmo2D(c); atmo.state = 'running'; atmoStartLoop(); };
+  atmo.state = 'starting'; atmo.canvas = c;
+  const begin2D = () => { atmo.render = atmo2D(); atmo.state = 'running'; atmoStartLoop(); };
   if (atmo.tried && !navigator.gpu) { begin2D(); return; }
   atmo.tried = true;
   (async () => {
     let r = null;
-    try { r = await atmoWebGPU(c); } catch (e) { r = null; }
+    try { r = await atmoWebGPU(); } catch (e) { r = null; }
     if (r) { atmo.render = r; atmo.state = 'running'; atmoStartLoop(); }
     else begin2D();
   })();
@@ -1255,16 +1284,20 @@ function wireSandboxSim() {
     sbSim.agents = [];
     return;
   }
-  const c = document.getElementById('sbStage');
-  if (!c) return;
+  if (!document.getElementById('sbStage')) return;
   if (sbSim.agents.length === 0) sbSeed();
   if (sbSim.raf !== null) return;   // loop already running
-  const ctx = c.getContext('2d');
   let frames = 0;
   function frame() {
-    if (state.phase !== 'sandbox' || !document.getElementById('sbStage')) {
+    // Re-acquire the canvas every frame: each sandbox re-render rebuilds
+    // stage.innerHTML, replacing #sbStage with a fresh element. A context
+    // captured once would keep drawing to the detached old canvas (blank
+    // on screen). Grab the live element + its 2D context each tick.
+    const c = document.getElementById('sbStage');
+    if (state.phase !== 'sandbox' || !c) {
       sbSim.raf = null; return;
     }
+    const ctx = c.getContext('2d');
     frames++;
     if (frames % 90 === 0) sbRebalance();   // track territory ~1.5s
     ctx.clearRect(0, 0, c.width, c.height);
