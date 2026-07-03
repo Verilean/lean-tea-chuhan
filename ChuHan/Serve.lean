@@ -1,4 +1,5 @@
 import LeanTea
+import LeanTea.Persist.Sqlite
 import LeanJs.Parser
 import LeanJs.Codegen
 import ChuHan.Game
@@ -486,6 +487,111 @@ private def handleGm (cfg : LeanTea.Llm.Openai.Config) (req : Request) : IO Resp
       let body := Json.mkObj [("error", Json.str s!"llm: {e}")]
       return Response.text 500 body.compress
 
+/-! ## Save slots — server-side SQLite persistence
+
+Named save slots live in a SQLite DB keyed by a client-generated
+"save code" (`save_key`), so a player can restore their slots on
+another device by entering the same code. Autosave stays client-side
+(localStorage); only explicit slots hit the server.
+
+SQLite is vendored into the binary (no external libsqlite3), so this
+works anywhere the server runs. The DB file is `$CHUHAN_DB` (default
+`chuhan_saves.db` in the cwd); on a host with an ephemeral disk (e.g.
+Render without a mounted volume) point it at a persistent path. -/
+
+private def saveDbPath : IO String := do
+  return (← IO.getEnv "CHUHAN_DB").getD "chuhan_saves.db"
+
+/-- Open the save DB with a busy timeout so brief write-lock contention
+    (concurrent saves) retries instead of erroring. -/
+private def openSaveDb : IO LeanTea.Sqlite.Db := do
+  let db ← LeanTea.Sqlite.open' (← saveDbPath)
+  LeanTea.Sqlite.exec db "PRAGMA busy_timeout=3000;"
+  return db
+
+/-- Create the saves table if missing. Run once at boot. -/
+private def initSaveDb : IO Unit := do
+  let db ← openSaveDb
+  LeanTea.Sqlite.exec db
+    "CREATE TABLE IF NOT EXISTS saves (\
+       save_key   TEXT NOT NULL, \
+       slot       TEXT NOT NULL, \
+       label      TEXT NOT NULL DEFAULT '', \
+       state      TEXT NOT NULL, \
+       updated_at INTEGER NOT NULL, \
+       PRIMARY KEY (save_key, slot));"
+  LeanTea.Sqlite.close db
+
+/-- Parse `k=v&k2=v2` (query string, no `?`). Save codes and slot ids
+    are alnum, so no URL-decoding is needed. -/
+private def queryParam (q name : String) : Option String :=
+  (q.splitOn "&").findSome? fun kv =>
+    match kv.splitOn "=" with
+    | [k, v] => if k == name then some v else none
+    | _      => none
+
+/-- A save code / slot id must be a short alnum(+`-_`) token. Params are
+    bound (no injection risk); this just rejects junk early. -/
+private def validId (s : String) : Bool :=
+  0 < s.length && s.length ≤ 64 && s.all fun c => c.isAlphanum || c == '-' || c == '_'
+
+/-- `POST /api/save` — upsert `{key, slot, label, state}`. -/
+private def handleSave (req : Request) : IO Response := do
+  match Json.parse (String.fromUTF8! req.body) with
+  | .error e => return Response.json 400 (Json.mkObj [("error", Json.str s!"bad json: {e}")])
+  | .ok j =>
+    let key := jstrField j "key"
+    let slot := jstrField j "slot"
+    let label := jstrField j "label"
+    if !validId key || !validId slot then
+      return Response.json 400 (Json.mkObj [("error", Json.str "bad key/slot")])
+    match (j.getObjVal? "state").toOption with
+    | none => return Response.json 400 (Json.mkObj [("error", Json.str "missing state")])
+    | some stateJson =>
+      let db ← openSaveDb
+      let _ ← LeanTea.Sqlite.execp db
+        "INSERT INTO saves (save_key, slot, label, state, updated_at) \
+         VALUES (?, ?, ?, ?, CAST(strftime('%s','now') AS INTEGER)) \
+         ON CONFLICT(save_key, slot) DO UPDATE SET \
+           label=excluded.label, state=excluded.state, updated_at=excluded.updated_at;"
+        #[key, slot, label, stateJson.compress]
+      LeanTea.Sqlite.close db
+      return Response.json 200 (Json.mkObj [("ok", Json.bool true)])
+
+/-- `GET /api/load?key=&slot=` — one slot's state. -/
+private def handleLoad (req : Request) : IO Response := do
+  let key := (queryParam req.query "key").getD ""
+  let slot := (queryParam req.query "slot").getD ""
+  if !validId key || !validId slot then
+    return Response.json 400 (Json.mkObj [("error", Json.str "bad key/slot")])
+  let db ← openSaveDb
+  let rows ← LeanTea.Sqlite.query db
+    "SELECT state, label, updated_at FROM saves WHERE save_key=? AND slot=?;"
+    #[key, slot]
+  LeanTea.Sqlite.close db
+  match rows[0]? with
+  | none => return Response.json 404 (Json.mkObj [("error", Json.str "no such slot")])
+  | some row =>
+    match Json.parse (row[0]!) with
+    | .ok st => return Response.json 200 (Json.mkObj [
+        ("state", st), ("label", Json.str (row[1]!)), ("updated_at", Json.str (row[2]!))])
+    | .error _ => return Response.json 500 (Json.mkObj [("error", Json.str "corrupt save")])
+
+/-- `GET /api/slots?key=` — metadata for a code's slots (for the menu). -/
+private def handleSlots (req : Request) : IO Response := do
+  let key := (queryParam req.query "key").getD ""
+  if !validId key then
+    return Response.json 400 (Json.mkObj [("error", Json.str "bad key")])
+  let db ← openSaveDb
+  let rows ← LeanTea.Sqlite.query db
+    "SELECT slot, label, updated_at FROM saves WHERE save_key=? ORDER BY slot;"
+    #[key]
+  LeanTea.Sqlite.close db
+  let items := rows.map fun row =>
+    Json.mkObj [("slot", Json.str (row[0]!)), ("label", Json.str (row[1]!)),
+                ("updated_at", Json.str (row[2]!))]
+  return Response.json 200 (Json.mkObj [("slots", Json.arr items)])
+
 /-! ## Handler -/
 
 def handler (cfg : LeanTea.Llm.Openai.Config)
@@ -524,6 +630,9 @@ def handler (cfg : LeanTea.Llm.Openai.Config)
   | "/api/ask", "POST" => handleAsk cfg req
   | "/api/resolve", "POST" => handleResolve cfg req
   | "/api/gm", "POST" => handleGm cfg req
+  | "/api/save", "POST" => handleSave req
+  | "/api/load", "GET"  => handleLoad req
+  | "/api/slots", "GET" => handleSlots req
   | "/favicon.ico", _ =>
     return { status := 204, headers := #[], body := .empty }
   | path, _ =>
@@ -604,6 +713,10 @@ def serveMain (args : List String) : IO Unit := do
                    then IO.FS.readFile runtimePath else pure ""
   auditAssets gameSrc (pageSrc ++ "\n" ++ runtimeSrc) (base ++ "/assets")
               (base ++ "/MISSING_ASSETS.txt")
+  /- Save-slot DB: create the table once so the first save just works.
+     SQLite is embedded, so this is a local file — no service to run. -/
+  initSaveDb
+  IO.println s!"  save DB: {← saveDbPath}"
   /- Use `serveConcurrent` because /api/ask can block on the LLM for
      several seconds; while it's blocked the user may still navigate
      the static page or fire another tab. -/
