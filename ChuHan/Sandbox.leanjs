@@ -602,7 +602,19 @@ def sbExpeditionLine(name, tier) :=
   else
     sconcat("🐎 壊滅。", sconcat(name, "の砂と海に大軍が呑まれた。生きて還った者は、わずか。"))
 
+-- 留守中、最も野心ある功臣が玉座の隙を嗅ぎ、忠誠が d だけ削れる。
+def sbCourtErode(court, d) :=
+  let rs := court.retainers;
+  let di := sbDangerIdx(rs, 0, 0, 0 - 1);
+  if di < 0 then court
+  else
+    (let r := arrGet(rs, di);
+     let r2 := {name: r.name, loyalty: sbClamp(r.loyalty - d), ambition: r.ambition, troops: r.troops, alive: r.alive};
+     {retainers: arrSet(rs, di, r2), drama: court.drama, purges: court.purges,
+      supply: court.supply, fame: court.fame, doom: court.doom})
+
 -- 遠征の解決。強さ(支配率合計)+運-距離-兵糧不足 で階層を決める。
+-- 遠いほど本国が留守になり、被侵攻と功臣の離心を招く(overreach の代償)。
 def sbExpedition(world, targetId) :=
   let court := world.court;
   let pf := sbPlayerFaction(world.who);
@@ -628,10 +640,18 @@ def sbExpedition(world, targetId) :=
                   else sbAdj(world.regions, mi, 0 - 35);
   -- 壊滅かつ自国が細ければ、異郷で野望が果てる(遠征死)
   let doom := if tier == 0 && strength < 120 then "exped_doom" else court.doom;
-  let court2 := {retainers: court.retainers, drama: court.drama, purges: court.purges,
+  -- ── 本国留守リスク ──────────────────────────────────────────────
+  -- 主力が遠くへ出た隙。遠いほど(dist)本国が突かれ、功臣が離心する。
+  let exposed := (rngInt() % 12) < dist;
+  let inv := if exposed then sbInvasion(regions2, world.who) else {regions: regions2, line: ""};
+  let court1 := {retainers: court.retainers, drama: court.drama, purges: court.purges,
                  supply: supply2, fame: court.fame + fameGain, doom: doom};
+  let court2 := sbCourtErode(court1, idiv(dist, 2));
+  let expLine := sbExpeditionLine(f.name, tier);
+  let log2 := if inv.line == "" then arrPush(world.log, expLine)
+              else arrPush(arrPush(world.log, expLine), sconcat("〔留守を突かれ〕 ", inv.line));
   sbWorld(world.mode, sbNextYear(world.year, world.season), sbNextSeason(world.season),
-    world.loc, regions2, arrPush(world.log, sbExpeditionLine(f.name, tier)), 0, world.who, court2)
+    world.loc, inv.regions, log2, 0, world.who, court2)
 
 -- ── 主人公アンカー ────────────────────────────────────────────────
 def sbAnchorLabel(anchor) :=
