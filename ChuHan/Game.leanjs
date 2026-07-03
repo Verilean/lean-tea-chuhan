@@ -4397,6 +4397,99 @@ def sfxForKind(kind) :=
   else if kind == "char" then "chime"
   else ""
 
+-- ── Canvas 2D 描画 extern(薄いホスト境界)+ 描画ロジック ──────────
+-- 命令的な canvas 呼び出しは extern の1行に閉じ込め、座標・寸法・色の
+-- 計算ロジックは LeanJs 側(do/for/let mut)で書く。こうすることで
+-- 描画コードも LeanJs のコンパイル(記法・アリティ検査)を通る。
+extern js "(c,v)=>{c.strokeStyle=v;}" ctxSetStroke
+extern js "(c,v)=>{c.fillStyle=v;}" ctxSetFill
+extern js "(c,v)=>{c.lineWidth=v;}" ctxSetLineWidth
+extern js "(c,v)=>{c.font=v;}" ctxSetFont
+extern js "(c,v)=>{c.textAlign=v;}" ctxSetTextAlign
+extern js "(c)=>{c.beginPath();}" ctxBeginPath
+extern js "(c,x,y)=>{c.moveTo(x,y);}" ctxMoveTo
+extern js "(c,x,y)=>{c.lineTo(x,y);}" ctxLineTo
+extern js "(c)=>{c.stroke();}" ctxStroke
+extern js "(c)=>{c.fill();}" ctxFill
+extern js "(c,x,y,w,h)=>{c.fillRect(x,y,w,h);}" ctxFillRect
+extern js "(c,x,y,w,h)=>{c.clearRect(x,y,w,h);}" ctxClearRect
+extern js "(c,x,y,r,a,b)=>{c.arc(x,y,r,a,b);}" ctxArc
+extern js "(c,s,x,y)=>{c.fillText(s,x,y);}" ctxFillText
+extern js "Math.sin" mathSin
+extern js "Math.max" mathMax
+-- 数値レンジ列(for ループ用): [lo, lo+step, … < hi]。
+extern js "(lo,hi,step)=>{const a=[];for(let i=lo;i<hi;i+=(step||1))a.push(i);return a;}" range
+
+-- 群衆シミュの1体を描く(棒人間 + 歩行サイクル + 任意の名札)。
+def sbDrawFigure(ctx, a) := do
+  let scale := 0.6 + (a.y - 70) / 80 * 0.7;
+  let bob := mathSin(a.ph) * 1.5;
+  let x := a.x;
+  let y := a.y + bob;
+  let col := sbColor(a.faction);
+  let h := 9 * scale;
+  let stride := mathSin(a.ph * 2) * 2 * scale;
+  let _ := ctxSetStroke(ctx, col);
+  let _ := ctxSetFill(ctx, col);
+  let _ := ctxSetLineWidth(ctx, 1.4 * scale);
+  let _ := ctxBeginPath(ctx);
+  let _ := ctxMoveTo(ctx, x, y);
+  let _ := ctxLineTo(ctx, x - stride, y + h * 0.5);
+  let _ := ctxMoveTo(ctx, x, y);
+  let _ := ctxLineTo(ctx, x + stride, y + h * 0.5);
+  let _ := ctxMoveTo(ctx, x, y);
+  let _ := ctxLineTo(ctx, x, y - h);
+  let _ := ctxStroke(ctx);
+  let _ := ctxBeginPath(ctx);
+  let _ := ctxArc(ctx, x, y - h - 1.6 * scale, 1.8 * scale, 0, 6.29);
+  let _ := ctxFill(ctx);
+  if a.notable && a.label then (
+    let _ := ctxSetFill(ctx, "#f0e6d2");
+    let _ := ctxSetFont(ctx, sconcat(numStr(6 * scale + 3), "px sans-serif"));
+    let _ := ctxSetTextAlign(ctx, "center");
+    ctxFillText(ctx, a.label, x, y - h - 6 * scale)
+  ) else null
+
+-- マス戦闘のキャンバス描画(床グリッド + 兵 + HP バー + 斬撃 fx)。
+def drawBattle(ctx, w, h, b) := do
+  let _ := ctxSetFill(ctx, "#2a2418");
+  let _ := ctxFillRect(ctx, 0, 0, w, h);
+  let _ := ctxSetStroke(ctx, "#3a3018");
+  let _ := ctxSetLineWidth(ctx, 1);
+  for gx in range(0, w, 32) do (
+    let _ := ctxBeginPath(ctx);
+    let _ := ctxMoveTo(ctx, gx, 0);
+    let _ := ctxLineTo(ctx, gx, h);
+    ctxStroke(ctx)
+  );
+  for gy in range(0, h, 32) do (
+    let _ := ctxBeginPath(ctx);
+    let _ := ctxMoveTo(ctx, 0, gy);
+    let _ := ctxLineTo(ctx, w, gy);
+    ctxStroke(ctx)
+  );
+  for e in b.entities do (
+    if e.hp > 0 then (
+      let _ := ctxSetFill(ctx, e.color);
+      let _ := ctxFillRect(ctx, e.x - 12, e.y - 12, 24, 24);
+      let _ := ctxSetFill(ctx, "#fff");
+      let _ := ctxFillRect(ctx, e.x + e.facing.dx * 14 - 2, e.y + e.facing.dy * 14 - 2, 4, 4);
+      let hpFrac := mathMax(0, e.hp / e.maxHp);
+      let _ := ctxSetFill(ctx, "#3a2a1a");
+      let _ := ctxFillRect(ctx, e.x - 12, e.y - 22, 24, 3);
+      let _ := ctxSetFill(ctx, if hpFrac > 0.5 then "#16a34a" else if hpFrac > 0.25 then "#ca8a04" else "#dc2626");
+      ctxFillRect(ctx, e.x - 12, e.y - 22, 24 * hpFrac, 3)
+    ) else null
+  );
+  for fx in b.fx do (
+    let _ := ctxSetStroke(ctx, "#fbbf24");
+    let _ := ctxSetLineWidth(ctx, 2);
+    let _ := ctxBeginPath(ctx);
+    let _ := ctxArc(ctx, fx.x, fx.y, fx.r, 0, 6.2832);
+    ctxStroke(ctx)
+  );
+  null
+
 def sbWorld(mode, year, season, loc, regions, log, pending, who) :=
   {mode: mode, year: year, season: season, loc: loc,
    regions: regions, log: log, pending: pending, who: who}

@@ -700,7 +700,8 @@ function wireAtmo() {
 // territory (flip a region and the mix visibly shifts). Purely
 // ephemeral animation state — never touches the pure `state`. ───────
 let sbSim = { agents: [], raf: null, w: 520, h: 150 };
-const SB_FCOL = { han: '#3b82f6', chu: '#ef4444', qin: '#9ca3af', lords: '#22c55e' };
+// Faction colours moved to Game.leanjs (sbColor); sbDrawFigure there
+// reads them. SB_NOTABLE stays — the sim wiring below tags notables.
 const SB_NOTABLE = { han: '韓信', chu: '項羽', qin: '子嬰', lords: '諸侯' };
 
 // sbTargetCounts(world) now lives in Game.leanjs (compiled by LeanJs);
@@ -747,33 +748,8 @@ function sbSeed() {
     }
   }
 }
-function sbDrawFigure(ctx, a) {
-  const bob = Math.sin(a.ph) * 1.5;
-  const scale = 0.6 + (a.y - 70) / 80 * 0.7;   // nearer (lower) = bigger
-  const x = a.x, y = a.y + bob;
-  ctx.strokeStyle = SB_FCOL[a.faction] || '#aaa';
-  ctx.fillStyle = SB_FCOL[a.faction] || '#aaa';
-  ctx.lineWidth = 1.4 * scale;
-  const h = 9 * scale;
-  // legs (walk cycle)
-  const stride = Math.sin(a.ph * 2) * 2 * scale;
-  ctx.beginPath();
-  ctx.moveTo(x, y); ctx.lineTo(x - stride, y + h * 0.5);
-  ctx.moveTo(x, y); ctx.lineTo(x + stride, y + h * 0.5);
-  // body
-  ctx.moveTo(x, y); ctx.lineTo(x, y - h);
-  ctx.stroke();
-  // head
-  ctx.beginPath();
-  ctx.arc(x, y - h - 1.6 * scale, 1.8 * scale, 0, 6.29);
-  ctx.fill();
-  if (a.notable && a.label) {
-    ctx.fillStyle = '#f0e6d2';
-    ctx.font = (6 * scale + 3) + 'px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(a.label, x, y - h - 6 * scale);
-  }
-}
+// sbDrawFigure(ctx, a) now lives in Game.leanjs (compiled by LeanJs,
+// using do / canvas externs). The crowd-sim loop below calls it.
 function wireSandboxSim() {
   if (state.phase !== 'sandbox') {
     if (sbSim.raf !== null) { cancelAnimationFrame(sbSim.raf); sbSim.raf = null; }
@@ -1179,39 +1155,9 @@ function renderBattle() {
   if (battleRafHandle === null) battleRafHandle = requestAnimationFrame(frame);
 }
 
-// Plain JS draw routine — sprites and HP bars. The LeanJs side
-// owns the game state; this is pure rendering.
-function drawBattle(ctx, W, H, b) {
-  ctx.fillStyle = '#2a2418'; ctx.fillRect(0, 0, W, H);
-  // floor grid
-  ctx.strokeStyle = '#3a3018'; ctx.lineWidth = 1;
-  for (let x = 0; x < W; x += 32) {
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
-  }
-  for (let y = 0; y < H; y += 32) {
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-  }
-  // entities
-  for (const e of b.entities) {
-    if (e.hp <= 0) continue;
-    ctx.fillStyle = e.color;
-    ctx.fillRect(e.x - 12, e.y - 12, 24, 24);
-    // facing arrow
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(e.x + e.facing.dx * 14 - 2, e.y + e.facing.dy * 14 - 2, 4, 4);
-    // hp bar
-    const hpW = 24, hpFrac = Math.max(0, e.hp / e.maxHp);
-    ctx.fillStyle = '#3a2a1a';
-    ctx.fillRect(e.x - hpW/2, e.y - 22, hpW, 3);
-    ctx.fillStyle = hpFrac > 0.5 ? '#16a34a' : hpFrac > 0.25 ? '#ca8a04' : '#dc2626';
-    ctx.fillRect(e.x - hpW/2, e.y - 22, hpW * hpFrac, 3);
-  }
-  // attack swings
-  for (const fx of b.fx) {
-    ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(fx.x, fx.y, fx.r, 0, Math.PI * 2); ctx.stroke();
-  }
-}
+// drawBattle(ctx, W, H, b) now lives in Game.leanjs — ported to LeanJs
+// do / for loops over the grid + entities + fx, with the canvas calls
+// as thin externs. renderBattle() below calls the compiled version.
 
 // Subscribe to phase changes so the battle loop kicks in once we
 // enter `phase === 'battle'` from a dialogue choice.
