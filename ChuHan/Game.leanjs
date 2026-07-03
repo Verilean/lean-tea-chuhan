@@ -3058,24 +3058,28 @@ def update(msg, state) :=
                        char: "", sceneId: "", beat: 0,
                        stats: state.stats, flags: state.flags,
                        battle: state.battle, endingId: "", toast: "" , mini: state.mini, llm: state.llm, resolve: state.resolve}
-  | "enterSandbox" => sbStateWith(state, initWorld("sandbox"))
+  | "sbSetup" => { phase: "sbSetup", lang: state.lang,
+                       char: "", sceneId: "", beat: 0,
+                       stats: state.stats, flags: state.flags,
+                       battle: state.battle, endingId: "", toast: "" , mini: state.mini, llm: state.llm, resolve: state.resolve}
+  | "sbStart" => sbStateWith(state, initWorldFor(msg.anchor, msg.mode))
   | "sbAdvance" => sbStateWith(state, sbTick(state.world))
   | "gmSubmit" => (
     let w := state.world;
     sbStateWith(state,
       sbWorld(w.mode, w.year, w.season, w.loc, w.regions,
-        arrPush(w.log, sconcat("▶ 劉邦: ", msg.text)), 1)))
+        arrPush(w.log, sconcat(sconcat("▶ ", sconcat(w.who, ": ")), msg.text)), 1, w.who)))
   | "gmResult" => (
     let w := state.world;
     let regions2 := sbApplyDeltas(w.regions, msg.deltas, 0);
     sbStateWith(state,
       sbWorld(w.mode, sbNextYear(w.year, w.season), sbNextSeason(w.season),
-        w.loc, regions2, arrPush(w.log, msg.narration), 0)))
+        w.loc, regions2, arrPush(w.log, msg.narration), 0, w.who)))
   | "gmError" => (
     let w2 := sbTick(state.world);
     sbStateWith(state,
       sbWorld(w2.mode, w2.year, w2.season, w2.loc, w2.regions,
-        arrPush(w2.log, sconcat("（AI 不通ゆえ天下は独りでに動いた）", msg.text)), 0)))
+        arrPush(w2.log, "（AI 不通ゆえ、天下は独りでに動いた）"), 0, w2.who)))
   | "toTitle" => { phase: "title", lang: state.lang,
                        char: "", sceneId: "", beat: 0,
                        stats: state.stats, flags: state.flags,
@@ -3731,7 +3735,7 @@ def viewTitle(state) :=
   sjoin([
     "<div class='title-bg'><h1>楚漢恋歌</h1><div class='sub'>CHU·HAN LOVE SONG</div>",
     button("primary", {tag: "startSelect"}, "START"),
-    button("primary", {tag: "enterSandbox"}, "群雄サンドボックス β"),
+    button("primary", {tag: "sbSetup"}, "群雄サンドボックス β"),
     button("primary", {tag: "openGallery"}, "END ギャラリー"),
     "<div class='sub' style='font-size:11px;color:#666;margin-top:60px'>",
     "六つの生、六つの死、六つの恋。<br>BCE 209 ─ 195. Six lives. Six loves. Six deaths.<br><br>",
@@ -4308,14 +4312,71 @@ def sbCount(regions, owner, i, acc) :=
       acc + (if arrGet(regions, i).owner == owner then 1 else 0))
   else acc
 
-def sbWorld(mode, year, season, loc, regions, log, pending) :=
+def sbWorld(mode, year, season, loc, regions, log, pending, who) :=
   {mode: mode, year: year, season: season, loc: loc,
-   regions: regions, log: log, pending: pending}
+   regions: regions, log: log, pending: pending, who: who}
 
-def initWorld(mode) :=
-  sbWorld(mode, 206, 0, "hanzhong", sbRegions,
-    ["漢中。あなたは劉邦。天下はまだ、誰のものでもない。行動を書けば AI の軍師が即興で世を動かし、書かねば季だけが流れていく。"],
-    0)
+-- ── 主人公アンカー ────────────────────────────────────────────────
+def sbAnchorLabel(anchor) :=
+  if anchor == "liubang" then "劉邦"
+  else if anchor == "luzhi" then "呂雉"
+  else if anchor == "qin" then "秦の遺臣"
+  else if anchor == "soldier" then "一兵卒"
+  else "劉邦"
+
+def sbOpening(anchor) :=
+  if anchor == "liubang" then
+    "漢中。あなたは劉邦。天下はまだ、誰のものでもない。行動を書けば軍師が即興で世を動かし、書かねば季だけが流れていく。"
+  else if anchor == "luzhi" then
+    "漢中。あなたは呂雉。夫は野に遊び、酒に溺れる。だが――天下を実際に統べるのが誰になるかは、まだ、決まっていない。"
+  else if anchor == "qin" then
+    "關中。あなたは秦の遺臣。咸陽は焼かれ、王・子嬰は死んだ。それでも灰の中で誓う――秦を、もう一度この地に。"
+  else if anchor == "soldier" then
+    "漢中の陣。あなたは名も無き一兵卒。天下の趨勢は遠く霞む。まずは、生き延びよ。手柄は、それからだ。"
+  else "漢中。乱世が始まる。"
+
+-- 秦復興アンカー用に關中/咸陽の秦支配を厚くした初期盤面。
+def sbQinBoost(regions) :=
+  let r1 := sbAdj(regions, sbIdxOf(regions, "guanzhong", 0), 25);
+  sbAdj(r1, sbIdxOf(r1, "xianyang", 0), 25)
+
+def initWorldFor(anchor, mode) :=
+  let regions := if anchor == "qin" then sbQinBoost(sbRegions) else sbRegions;
+  let loc := if anchor == "qin" then "guanzhong" else "hanzhong";
+  sbWorld(mode, 206, 0, loc, regions, [sbOpening(anchor)], 0, sbAnchorLabel(anchor))
+
+def initWorld(mode) := initWorldFor("liubang", mode)
+
+-- ── 史実モードの日付アンカー・イベント ───────────────────────────
+-- mode=="hist" のとき、実際の年表に沿って盤面を動かす。sandbox では
+-- 使わない(sbEvent の創発表 + LLM が回る)。
+def sbHistEvent(world) :=
+  let regions := world.regions;
+  let y := world.year;
+  if y == 206 then
+    {regions: sbAdj(regions, sbIdxOf(regions, "guanzhong", 0), 8),
+     line: "【史実 206】鴻門の宴。項羽四十万、關中に迫る。劉邦は百騎で詫びに赴き、辛くも生き延びた。"}
+  else if y == 205 then
+    {regions: sbAdj(sbOwn(regions, sbIdxOf(regions, "pengcheng", 0), "chu"), sbIdxOf(regions, "hanzhong", 0), -20),
+     line: "【史実 205】彭城の大敗。項羽三万の鉄騎が漢五十六万を撃砕。劉邦は数十騎で逃げ、父と妻・呂雉は捕らわれた。"}
+  else if y == 204 then
+    {regions: sbOwn(regions, sbIdxOf(regions, "zhao", 0), "han"),
+     line: "【史実 204】背水之陣。韓信、趙を破る。北の天秤が漢に傾く。"}
+  else if y == 203 then
+    {regions: sbOwn(regions, sbIdxOf(regions, "qi", 0), "han"),
+     line: "【史実 203】韓信、齊を平定。鴻溝の和なり、天下は楚と漢に二分される。"}
+  else if y == 202 then
+    {regions: sbOwn(sbOwn(regions, sbIdxOf(regions, "pengcheng", 0), "han"), sbIdxOf(regions, "wei", 0), "han"),
+     line: "【史実 202】垓下。四面楚歌。項羽、烏江に自刎す。漢、遂に天下を得る。"}
+  else
+    {regions: regions, line: "史実の狭間。世は静かに時を刻む。"}
+
+def sbTickEvent(world) :=
+  if world.mode == "hist" then
+    (if world.season == 0 then sbHistEvent(world)
+     else {regions: world.regions,
+           line: sconcat(sbSeason(world.season), "。兵を養い、天下の風を読む。")})
+  else sbEvent(world)
 
 -- 次の季へ日付を進める(BCE は減算)。{year, season} を返す。
 def sbNextYear(year, season) := if season + 1 > 3 then year - 1 else year
@@ -4339,55 +4400,118 @@ def sbStateWith(state, world) := {
   mini: state.mini, llm: state.llm, resolve: state.resolve, world: world
 }
 
+-- 領有勢力に応じた短い枕詞(文に彩りを添える)。
+def sbAt(r) := sconcat(r.ja, sconcat("（", sconcat(sbName(r.owner), "）")))
+
 -- 一手ぶんの創発イベント。{regions, line} を返す。笑い/葛藤/驚きを混ぜる。
+-- ~24 種。地域の領有・引き当てで文が変わる。
 def sbEvent(world) :=
   let regions := world.regions;
   let n := arrLen(regions);
-  let ev := rngInt() % 9;
+  let ev := rngInt() % 24;
   let ri := rngInt() % n;
   let r := arrGet(regions, ri);
+  let coin := rngInt() % 2 == 0;
   if ev == 0 then
-    {regions: sbAdj(regions, ri, 12),
-     line: sconcat("韓信、密かに陳倉を渡る。", sconcat(r.ja, "の漢軍が勢いづいた。"))}
+    {regions: sbAdj(regions, ri, 14),
+     line: sconcat("韓信、桟道を焼いて敵を欺き、密かに陳倉を渡る。誰も渡れると思わなかった道だ。", sconcat(r.ja, "の漢軍が勢いづく。"))}
   else if ev == 1 then
     (if r.owner == "han"
-     then {regions: sbAdj(regions, ri, -15),
-           line: sconcat("項羽の急襲。", sconcat(r.ja, "の漢の支配が揺らぐ。"))}
-     else {regions: sbAdj(regions, ri, -6),
-           line: sconcat("楚の鉄騎が", sconcat(r.ja, "を圧した。"))})
+     then {regions: sbAdj(regions, ri, -16),
+           line: sconcat("項羽の急襲。半夜の砂塵から三万の鉄騎が湧いた。", sconcat(r.ja, "の漢の支配が音を立てて崩れる。"))}
+     else {regions: sbAdj(regions, ri, -7),
+           line: sconcat("楚の鉄騎が", sconcat(r.ja, "を蹂躙した。項羽の前では、数は意味を失う。"))})
   else if ev == 2 then
-    {regions: sbAdj(regions, sbIdxOf(regions, "guanzhong", 0), 11),
-     line: "關中で秦の残党が旗を上げた。……復興の火種か、ただの残り火か。"}
+    {regions: sbAdj(regions, sbIdxOf(regions, "guanzhong", 0), 12),
+     line: "關中で秦の遺臣が旗を上げた。老兵たちが錆びた戈を磨いている。……復興の火種か、ただの残り火か。"}
   else if ev == 3 then
     (if r.owner == "lords"
-     then {regions: sbOwn(regions, ri, (if rngInt() % 2 == 0 then "han" else "chu")),
-           line: sconcat(r.ja, "の諸侯が寝返った。旗色を読むのが乱世の作法だ。")}
+     then {regions: sbOwn(regions, ri, (if coin then "han" else "chu")),
+           line: sconcat(r.ja, "の諸侯が寝返った。旗色を読むのが乱世の作法、恥じることではない――と本人は言う。")}
      else {regions: regions,
-           line: sconcat(r.ja, "の諸侯は日和見を決め込み、酒を送ってきた。")})
+           line: sconcat(r.ja, "の諸侯は日和見を決め込み、両陣営に同じ酒を送ってきた。")})
   else if ev == 4 then
     {regions: regions,
-     line: "劉邦、酒と美姫に半日を溶かす。……天下は、特に何も起きなかった。"}
+     line: "劉邦、酒と美姫に半日を溶かす。側近が青ざめる中――天下は、特に、何も起きなかった。"}
   else if ev == 5 then
-    {regions: sbAdj(regions, ri, -10),
-     line: sconcat("飢饉。", sconcat(r.ja, "の民が細り、流れていく。"))}
+    {regions: sbAdj(regions, ri, -12),
+     line: sconcat("飢饉。", sconcat(r.ja, "の民が細り、流れていく。倉を開くべきか、兵に回すべきか。"))}
   else if ev == 6 then
     (if r.owner == "han"
-     then {regions: sbAdj(regions, ri, 8),
-           line: sconcat("名もなき一兵卒が", sconcat(r.ja, "で武功を立てた。誰も、その名を知らぬ。"))}
+     then {regions: sbAdj(regions, ri, 9),
+           line: sconcat("名もなき一兵卒が", sconcat(r.ja, "で城壁を最初に越えた。誰も、その名を知らぬ。恩賞は隊長の懐へ。"))}
      else {regions: regions,
-           line: "斥候が手ぶらで帰ってきた。腹だけ空かせて。"})
+           line: "斥候が手ぶらで帰ってきた。腹だけ空かせて、言い訳だけは達者に。"})
   else if ev == 7 then
     {regions: regions,
      line: "呂雉より書簡。「留守は、私が守ります」――その端正な筆致に、なぜか背が冷えた。"}
+  else if ev == 8 then
+    (if r.owner == "chu"
+     then {regions: sbAdj(regions, ri, 10),
+           line: sconcat("范増が三度、玉玦を挙げた。項羽が珍しく耳を貸し、", sconcat(r.ja, "の楚が締まる。"))}
+     else {regions: regions,
+           line: "范増、また項羽に容れられず。「豎子ともに謀るに足らず」と老軍師は杖を鳴らす。"})
+  else if ev == 9 then
+    (if r.owner == "han"
+     then {regions: sbAdj(regions, ri, 12),
+           line: sconcat("張良、帷幄の中に謀り、千里の外に勝つ。派手さはない。だが", sconcat(r.ja, "の趨勢が静かに漢へ傾いた。"))}
+     else {regions: regions, line: "張良は病と称して動かない。彼が動かぬ時は、動く価値がない時だ。"})
+  else if ev == 10 then
+    {regions: sbAdj(regions, sbIdxOf(regions, "hanzhong", 0), 8),
+     line: "蕭何、關中から兵糧と壮丁を絶やさず送り続ける。地味だ。だが、これが無ければ全部が崩れる。"}
+  else if ev == 11 then
+    {regions: sbAdj(regions, ri, -14),
+     line: sconcat("疫病が陣を舐める。", sconcat(r.ja, "では敵も味方も同じように倒れた。天は、依怙贔屓をしない。"))}
+  else if ev == 12 then
+    {regions: regions,
+     line: "虞姫が舞う。楚の陣に束の間の静けさ。項羽の横顔だけが、いつもより幼く見えた。"}
+  else if ev == 13 then
+    (if r.owner == "lords" || r.ctrl < 40
+     then {regions: sbAdj(regions, ri, 8),
+           line: sconcat(r.ja, "の民が自ら帰順を申し出た。苛政に飽いたのだ。徳は、時に兵より速い。")}
+     else {regions: regions, line: sconcat(r.ja, "の里で童歌が流行る。歌詞は、次の天下人の名を、まだ決めかねている。")})
+  else if ev == 14 then
+    {regions: sbAdj(regions, ri, -6),
+     line: sconcat("使者が席で失言し、その場で開戦に転がった。", sconcat(r.ja, "が巻き添えを食う。舌は、剣より軽率だ。"))}
+  else if ev == 15 then
+    {regions: sbAdj(regions, ri, 7),
+     line: sconcat("時ならぬ雨が渡河を助けた。", sconcat(r.ja, "で天が味方をした――今日だけは。"))}
+  else if ev == 16 then
+    (if r.owner == "han"
+     then {regions: sbAdj(regions, ri, -9),
+           line: sconcat(r.ja, "で内通が露見した。将の一人が楚と通じていた。斬るか、抱き込むか、見て見ぬふりか。")}
+     else {regions: regions, line: "投降者が二人、真夜中に陣へ転がり込んできた。値打ちものか、間者か。"})
+  else if ev == 17 then
+    {regions: sbAdj(regions, sbIdxOf(regions, "hanzhong", 0), 6),
+     line: "韓信が「多々益々弁ず(兵は多いほど良い)」と嘯いた。頼もしい。……そして、少し、危うい。"}
+  else if ev == 18 then
+    (if r.owner == "chu"
+     then {regions: sbAdj(regions, ri, 9),
+           line: sconcat(r.ja, "で項羽が降兵を坑にした。恐怖が広がり、抵抗は減る。だが――民心も、共に凍った。")}
+     else {regions: regions, line: "項羽の武勇伝がまた一つ増えた。敵はそれを聞いて、なぜか少し安心する。"})
+  else if ev == 19 then
+    {regions: sbOwn(regions, ri, (if coin then "han" else "chu")),
+     line: sconcat("諸侯連合に亀裂。", sconcat(r.ja, "が一夜で旗を変えた。乱世の同盟は、朝と夜で色が違う。"))}
+  else if ev == 20 then
+    {regions: regions,
+     line: sconcat("軍議が紛糾し、結論が出ぬまま夜が明けた。", sconcat(sbAt(r), "の件は、また明日。"))}
+  else if ev == 21 then
+    {regions: sbAdj(regions, ri, (if coin then 6 else -6)),
+     line: sconcat("風向きが変わった。", sconcat(sbAt(r), "を軸に、天下がひとつ、軋みながら動く。"))}
+  else if ev == 22 then
+    (if r.owner == "qin"
+     then {regions: sbAdj(regions, ri, -10),
+           line: sconcat("諸将が", sconcat(r.ja, "の秦残党を挟撃した。復興の芽は、まだ細い。"))}
+     else {regions: regions, line: "咸陽の焼け跡から、玉璽の噂が流れる。持つ者が、天命を持つという。"})
   else
-    {regions: sbAdj(regions, ri, (if rngInt() % 2 == 0 then 5 else -5)),
-     line: sconcat("天下は", sconcat(r.ja, "を軸に、静かに一つ動いた。"))}
+    {regions: sbAdj(regions, ri, (if coin then 5 else -8)),
+     line: sconcat("斥候曰く、", sconcat(sbAt(r), "の空気が張り詰めている。何かが、起きる前の静けさだ。"))}
 
 def sbTick(world) :=
-  let e := sbEvent(world);
+  let e := sbTickEvent(world);
   sbWorld(world.mode, sbNextYear(world.year, world.season),
     sbNextSeason(world.season), world.loc,
-    e.regions, arrPush(world.log, e.line), 0)
+    e.regions, arrPush(world.log, e.line), 0, world.who)
 
 -- ── マップ描画(SVG 文字列)──────────────────────────────────────
 def sbRad(ctrl) := if ctrl > 70 then 7 else if ctrl > 40 then 5 else 4
@@ -4443,6 +4567,33 @@ def sbLog(log) :=
   let stop := if n > 6 then n - 6 else 0;
   sbLogFrom(log, n - 1, stop, "")
 
+-- ── アンカー選択画面 ─────────────────────────────────────────────
+def sbAnchorCard(anchor, title, desc) :=
+  sjoin([
+    "<div style='border:1px solid #4a3f2f;border-radius:8px;padding:12px;margin-bottom:10px;background:#17140f'>",
+    "<div style='font-size:16px;color:#f0e6d2;margin-bottom:2px'>", hesc(title), "</div>",
+    "<div style='font-size:12px;color:#9a8d73;margin-bottom:8px'>", hesc(desc), "</div>",
+    "<div style='display:flex;gap:8px'>",
+    button("primary", {tag: "sbStart", anchor: anchor, mode: "sandbox"}, "サンドボックス"),
+    button("ghost", {tag: "sbStart", anchor: anchor, mode: "hist"}, "史実"),
+    "</div></div>"
+  ])
+
+def viewSbSetup(state) :=
+  sjoin([
+    "<div style='max-width:520px;margin:0 auto;padding:20px'>",
+    "<h2 style='margin:0 0 4px'>誰として、乱世を生きる?</h2>",
+    "<div style='font-size:12px;color:#9a8d73;margin-bottom:16px'>",
+    "サンドボックス=史実に縛られぬ創発。史実=実際の年表が動く。行動を書けば AI 軍師が即興する（未接続でもローカルで進む）。</div>",
+    sbAnchorCard("liubang", "劉邦 ― 漢の群雄", "仮面の下に利己を隠した人たらし。天下取りの王道。"),
+    sbAnchorCard("luzhi", "呂雉 ― 冷徹な后", "夫は野に遊ぶ。天下を実際に統べるのは、誰だ。"),
+    sbAnchorCard("qin", "秦の遺臣 ― 復興を期す", "咸陽は焼けた。灰の中で、秦をもう一度。反史実ルート。"),
+    sbAnchorCard("soldier", "名も無き一兵卒", "趨勢は遠い。まず生き延び、手柄はそれから。小さな視点。"),
+    "<div style='margin-top:8px'>",
+    button("ghost", {tag: "toTitle"}, "タイトルへ"),
+    "</div></div>"
+  ])
+
 def viewSandbox(state) :=
   let w := state.world;
   let map := sjoin([
@@ -4452,24 +4603,40 @@ def viewSandbox(state) :=
     "</svg>"
   ]);
   let date := sjoin(["BCE ", numStr(w.year), " ・ ", sbSeason(w.season)]);
+  let modeBadge := if w.mode == "hist" then "史実" else "サンドボックス";
   let pend := if w.pending == 1
     then "<div style='color:#ffd54a;margin:8px 0'>……軍師が知恵を絞っている</div>"
     else "";
   sjoin([
     "<div style='max-width:560px;margin:0 auto;padding:16px'>",
+    "<canvas id='sbAtmo' width='520' height='60' style='width:100%;max-width:540px;height:auto;display:block;margin:0 auto 8px;border-radius:8px;border:1px solid #4a3f2f'></canvas>",
     "<div style='display:flex;justify-content:space-between;align-items:baseline'>",
-    "<h2 style='margin:0'>群雄割拠 ― 劉邦 <span style='font-size:12px;color:#888'>β</span></h2>",
+    "<h2 style='margin:0'>群雄割拠 ― ", hesc(w.who),
+    " <span style='font-size:11px;color:#888'>", hesc(modeBadge), " β</span></h2>",
     "<div style='color:#ffd54a;font-size:15px'>", hesc(date), "</div></div>",
     map,
     sbFactionBar(w.regions),
+    "<div style='text-align:center;color:#8a7d63;font-size:12px;margin-top:6px'>陣中 ― 兵たちが蠢く（勢力の色は支配地に比例）</div>",
+    "<canvas id='sbStage' width='520' height='150' style='width:100%;max-width:540px;height:auto;display:block;margin:4px auto 0;background:linear-gradient(#1c1811,#100e0a);border:1px solid #4a3f2f;border-radius:8px'></canvas>",
     panel("mini", "動静", sbLog(w.log)),
+    "<div style='margin-top:10px'>",
+    "<div style='display:flex;gap:8px;align-items:center;font-size:12px;color:#9a8d73;flex-wrap:wrap'>",
+    "<button id='imgGen' class='btn btn-ghost' style='font-size:12px'>この情景を描く（SD-Turbo・WebGPU・初回DL大）</button>",
+    "<span id='imgStatus'></span></div>",
+    "<canvas id='sbScene' width='512' height='512' style='display:none;width:100%;max-width:340px;height:auto;margin:8px auto 0;border-radius:8px;border:1px solid #4a3f2f'></canvas>",
+    "</div>",
     pend,
     "<div style='margin-top:12px'>",
     "<input id='gmInput' placeholder='劉邦として何をする? 例: 韓信を大将軍に任じ關中を突く' ",
     "style='width:100%;padding:9px;background:#0f0d0a;border:1px solid #4a3f2f;color:#eee;border-radius:6px;box-sizing:border-box'/>",
+    "<div style='display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;color:#9a8d73;flex-wrap:wrap'>",
+    "<button id='gmLoadAI' class='btn btn-ghost' style='font-size:12px'>ブラウザAI軍師を起動（初回DL ~1GB・WebGPU）</button>",
+    "<span id='gmAiStatus'>未起動でもローカルで進行可</span>",
+    "</div>",
     "<div style='display:flex;gap:8px;margin-top:8px;flex-wrap:wrap'>",
     "<button id='gmSend' class='btn btn-primary'>行動する（AI 軍師）</button>",
     button("primary", {tag: "sbAdvance"}, "季を進める（静観）▶"),
+    "<button id='sbBattle' class='btn btn-ghost'>⚔ 会戦を見る</button>",
     button("ghost", {tag: "toTitle"}, "タイトルへ"),
     "</div></div></div>"
   ])
@@ -4479,6 +4646,7 @@ def bgmForPhase(state) :=
   if state.phase == "title" then "title"
   else if state.phase == "select" then "title"
   else if state.phase == "sandbox" then "court"
+  else if state.phase == "sbSetup" then "title"
   else if state.phase == "gallery" then "title"
   else if state.phase == "ending" then "ending"
   else if state.phase == "battle" then "battle"
@@ -4504,6 +4672,7 @@ def viewByPhase(state) :=
   | "llm_chat"  => viewLlmChat(state)
   | "ai_resolve"=> viewAiResolve(state)
   | "gallery"   => viewGallery(state)
+  | "sbSetup"   => viewSbSetup(state)
   | "sandbox"   => viewSandbox(state)
   | _ => viewTitle(state)
 
