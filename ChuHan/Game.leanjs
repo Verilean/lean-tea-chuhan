@@ -3066,6 +3066,20 @@ def update(msg, state) :=
   | "sbAdvance" => sbStep(state, sbTick(state.world))
   | "sbSpecial" =>
     (if state.phase == "sandbox" then sbStep(state, sbSpecialResolve(state.world)) else state)
+  | "sbActionResult" => (
+    if state.phase == "sandbox" then
+      (let w := state.world;
+       let mi := sbTopIdxOf(w.regions, "han", 0, -1, 0);
+       let ei := sbTopEnemyIdx(w.regions, sbPlayerFaction(w.who), 0, -1, 0);
+       let regions2 := if msg.win
+         then sbAdj(w.regions, ei, 0 - msg.kills)
+         else sbAdj(w.regions, mi, -10);
+       let line := if msg.win
+         then sconcat("🗡 出撃。敵 ", sconcat(jstr(msg.kills), " を斬り伏せ、前線を押し込んだ。名も無き働きが、確かに天下を動かす。"))
+         else "🗡 出撃。深手を負って退いた。命あっての物種、手柄はまた次に。";
+       sbStep(state, sbWorld(w.mode, sbNextYear(w.year, w.season),
+         sbNextSeason(w.season), w.loc, regions2, arrPush(w.log, line), 0, w.who)))
+    else state)
   | "battleResolve" =>
     (if state.phase == "sandbox" then sbStep(state, sbBattleResolve(state.world)) else state)
   | "gmSubmit" => (
@@ -4820,6 +4834,7 @@ def viewSandbox(state) :=
     button("primary", {tag: "sbSpecial"}, sbSpecialLabel(w.who)),
     button("primary", {tag: "sbAdvance"}, "季を進める（静観）▶"),
     "<button id='sbBattle' class='btn btn-ghost'>⚔ 会戦を見る</button>",
+    "<button id='sbAction' class='btn btn-primary'>🗡 出撃（アクション）</button>",
     button("ghost", {tag: "toTitle"}, "タイトルへ"),
     "</div></div></div>"
   ])
