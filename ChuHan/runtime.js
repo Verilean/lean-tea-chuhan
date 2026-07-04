@@ -1024,6 +1024,73 @@ async function runBrowserResolve(action) {
   return { outcome: (j.outcome === 'good' || j.outcome === 'bad') ? j.outcome : 'ok', reasoning: j.reasoning || '' };
 }
 
+// ─── 決着をつける: turn a free chat into a GENERATED consequence, so the
+// player's words can actually change history (persuade → assassination,
+// defection, rupture, reconciliation…). LLM-authored on the fly. ───────
+async function runBrowserConclude(npcName, history) {
+  const convo = (history || [])
+    .filter(m => m && m.text && m.text.trim() && m.text !== '(空の応答)')
+    .map(m => (m.role === 'user' ? 'あなた' : npcName) + '「' + m.text + '」').join('\n');
+  const sys = 'あなたは楚漢戦争（紀元前3世紀の中国）の講談師。次の会話の"結末"を描け。'
+    + 'プレイヤーの言葉が' + npcName + 'をどれだけ動かしたかを冷徹に見極め、その帰結を一場面として書く。'
+    + '会話が真に説得的なら、史実を覆す大胆な帰結（暗殺・寝返り・決裂・和睦など）も起こしてよい。'
+    + '凡庸・無策・失礼なら、何も変わらぬまま終わる。'
+    + '返答は必ず次のJSON1行のみ: {"title":"結末の題(8字以内)","text":"帰結の描写(80-160字・日本語)","changed":true or false}';
+  const r = await webllm.engine.chat.completions.create({
+    messages: [{ role: 'system', content: sys },
+      { role: 'user', content: '【会話】\n' + convo + '\n\nこの会話の結末を判定し、描け。' }],
+    temperature: 0.9, max_tokens: 320
+  });
+  const j = JSON.parse(stripFence(r.choices[0].message.content));
+  return { title: j.title || 'その後', text: j.text || '', changed: !!j.changed };
+}
+
+function ensureConcludeOverlay() {
+  let ov = document.getElementById('concludeOverlay');
+  if (ov) return ov;
+  ov = document.createElement('div');
+  ov.id = 'concludeOverlay';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:1600;background:rgba(0,0,0,0.92);display:none;align-items:center;justify-content:center;padding:20px';
+  ov.innerHTML =
+    "<div style='background:#161009;border:1px solid #6a4a2f;border-radius:12px;padding:26px;max-width:520px;width:92vw;color:#f0e6d2;text-align:center'>" +
+    "<div id='concludeBadge' style='font-size:12px;color:#c8a86a;letter-spacing:2px;margin-bottom:8px'></div>" +
+    "<h2 id='concludeTitle' style='margin:0 0 12px;font-size:22px'></h2>" +
+    "<p id='concludeText' style='color:#d8cbb0;line-height:2;font-size:15px;margin:0 0 20px'></p>" +
+    "<div style='display:flex;gap:10px;justify-content:center;flex-wrap:wrap'>" +
+    "<button id='concludeCont' class='btn btn-primary'>この後を続ける</button>" +
+    "<button id='concludeTitleBtn' class='btn btn-ghost'>タイトルへ</button></div></div>";
+  document.body.appendChild(ov);
+  ov.querySelector('#concludeCont').addEventListener('click', () => {
+    ov.style.display = 'none';
+    state = update({tag: 'llmEnd'}, state); persist(state); render();
+  });
+  ov.querySelector('#concludeTitleBtn').addEventListener('click', () => {
+    ov.style.display = 'none';
+    state = update({tag: 'toTitle'}, state); persist(state); render();
+  });
+  return ov;
+}
+
+async function concludeChat() {
+  const st = document.getElementById('llmAiStatus');
+  if (!webllm.ready && navigator.gpu) {
+    if (st) st.textContent = '結末を思案するため AI を読み込み中…';
+    await loadBrowserAI();
+  }
+  if (!webllm.ready) { saveToast('結末の生成には「🧠 ブラウザAI起動」が必要です'); return; }
+  const npcName = state.llm.npcName, hist = state.llm.history.slice();
+  if (st) st.textContent = '……結末を描いている';
+  try {
+    const c = await runBrowserConclude(npcName, hist);
+    const ov = ensureConcludeOverlay();
+    ov.querySelector('#concludeBadge').textContent = c.changed ? '― 歴史は、揺れた ―' : '― 会話の果て ―';
+    ov.querySelector('#concludeTitle').textContent = c.title;
+    ov.querySelector('#concludeText').textContent = c.text;
+    ov.style.display = 'flex';
+  } catch (e) { saveToast('結末生成に失敗しました。もう一度お試しを'); }
+  if (st) st.textContent = '';
+}
+
 // Shared: wire the "🧠 ブラウザAI起動" button + status on the story
 // chat / resolve screens, so the in-browser model can be loaded there
 // too (not only from the sandbox).
@@ -1293,6 +1360,7 @@ stage.addEventListener('click', (e) => {
       if (lm) { sfxForButton(t); serverLoadSlot(+lm[1]); return; }
       if (msg.tag === 'applySaveCode') { sfxForButton(t); applySaveCodeFromInput(); return; }
       if (msg.tag === 'openLeaderboard') { sfxForButton(t); openLeaderboard(); return; }
+      if (msg.tag === 'concludeChat') { sfxForButton(t); concludeChat(); return; }
       const prevPhase = state.phase;
       sfxForButton(t);
       state = update(msg, state);
