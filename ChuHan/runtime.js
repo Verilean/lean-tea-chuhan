@@ -612,26 +612,27 @@ async function genScene() {
   }
 }
 
-// ─── Story improv: let the player interject freely in a scripted scene.
-// The LLM responds in-character (using the scene's speaker persona) and a
-// background is painted for the moment — the story's assets, played TRPG.
-let storyImprov = { bg: null, lines: [] };
+// ─── Story improv: the player takes the brush and the MAIN story continues
+// by improvisation — same dialogue box, same background, one flow. The LLM
+// narrates the next beat from the running history; the scene image repaints.
+let storyImprov = { bg: null, history: [], seeded: false, busy: false };
 
-async function runBrowserStoryImprov(ctx, text) {
-  const persona = NPC_PERSONA[ctx.npcId] || '';
-  const sys = 'あなたは楚漢戦争(紀元前3世紀)の講談師にして登場人物。' +
-    'プレイヤー(' + (ctx.char || '主人公') + ')が物語の一場面に割り込んで取った言動へ、' +
-    'その場の情景と人物がどう応じるかを地の文で描く。' + (persona ? ('場の人物: ' + persona + '。') : '') +
-    '厳守: 日本語で1〜2文・80字以内。人物の性格を守り、平易に。JSON・箇条書き・繰り返しは禁止。';
-  const r = await webllm.engine.chat.completions.create({
-    messages: [{ role: 'system', content: sys },
-      { role: 'user', content: '【場面】' + (ctx.scene || '') + '\n【直前の台詞】' + (ctx.line || '') + '\n【あなたの言動】' + text + '\n\nこの割り込みの帰結を描け。' }],
-    temperature: 0.8, max_tokens: 150
-  });
+// Continue the story: given the running history + the player's action, write
+// the next narrative beat (地の文), keeping character + period voice.
+async function runBrowserStoryContinue(ctx, action) {
+  const sys = 'あなたは楚漢戦争(紀元前3世紀の中国)を舞台にした対話型小説の語り手。' +
+    'プレイヤーは' + (ctx.char || '主人公') + '。その行動・台詞を受け、物語を次の一段へ進める。' +
+    '人物の性格と史実の空気を守り、地の文で描く。' + (ctx.persona ? ('関わる人物: ' + ctx.persona + '。') : '') +
+    '厳守: 日本語で2〜3文・60〜130字。情景と人物の反応を描き、続きを促す余韻で締める。' +
+    '説明・箇条書き・JSON・同じ表現の繰り返しは禁止。';
+  const msgs = [{ role: 'system', content: sys }];
+  for (const h of (ctx.history || []).slice(-8)) msgs.push(h);
+  msgs.push({ role: 'user', content: (ctx.char || '主人公') + 'は――' + action });
+  const r = await webllm.engine.chat.completions.create({ messages: msgs, temperature: 0.85, max_tokens: 200 });
   let t = (r.choices[0].message.content || '').trim();
   const parts = t.split(/(?<=。)/).filter(x => x.trim());
-  t = parts.slice(0, 2).join('').trim();
-  return (t.length > 120 ? t.slice(0, 118) + '…' : t);
+  t = parts.slice(0, 3).join('').trim();
+  return (t.length > 180 ? t.slice(0, 178) + '…' : t) || '（沈黙が流れた）';
 }
 
 // Paint a story background from a prompt and pin it behind the scene.
@@ -660,49 +661,49 @@ function applyStoryBg() {
 
 const IMPROV_PERSONA_BY_NAME = { '妙容': 'miaorong', '蕭何': 'xiaohe', '范増': 'fanzeng', '黄石公': 'huangshi', '項伯': 'xiangbo', '蒯通': 'kuaitong' };
 const IMPROV_CHAR_NAME = { liubang: '劉邦', xiangyu: '項羽', hanxin: '韓信', zhangliang: '張良', xiaohe: '蕭何', fanzeng: '范増' };
-function improvEsc(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
-// Story improv: interject in a scripted scene → in-character LLM reply + a
-// painted background. Wired on every scene render; the panel is a fixed
-// sibling of .scene-bg so clicks don't trigger the tap-to-advance.
+// Wired every scene render. When improv has taken over (state.improv.on), the
+// dialogue box IS the story: the player's action → LLM continues the main
+// narrative (improvBeat) → repaint the background. Same box, one flow.
 function wireStoryImprov() {
   if (state.phase !== 'scene') return;
-  applyStoryBg();                                  // re-pin painted bg after re-render
-  const log = document.getElementById('improvLog');
-  if (log) log.innerHTML = storyImprov.lines.slice(-8).map(l => "<div style='padding:3px 0;border-bottom:1px solid #3a3226'>" + improvEsc(l) + "</div>").join('');
-  const loadBtn = document.getElementById('improvLoadAI');
-  if (loadBtn && !loadBtn.dataset.wired) { loadBtn.dataset.wired = '1'; loadBtn.addEventListener('click', () => { loadBrowserAI(); loadImgGen(); }); }
-  const send = document.getElementById('improvSend');
-  const input = document.getElementById('improvInput');
-  if (!send || !input || send.dataset.wired) return;
-  send.dataset.wired = '1';
+  const on = state.improv && state.improv.on;
+  if (!on) { storyImprov.seeded = false; return; }
+  applyStoryBg();                                  // keep the painted bg pinned
+  if (!storyImprov.seeded) {                        // entering improv: seed history from the current line
+    storyImprov.history = [{ role: 'assistant', content: state.improv.text || '' }];
+    storyImprov.seeded = true;
+  }
+  const input = document.getElementById('improvGo');
+  const go = document.getElementById('improvGoBtn');
   const st = document.getElementById('improvStatus');
-  const doImprov = async () => {
+  if (!input || !go || go.dataset.wired) return;
+  go.dataset.wired = '1';
+  const step = (typeof stepAt === 'function') ? stepAt(sceneOf(state.sceneId), state.beat) : {};
+  const who = step.who || '';
+  const ctx = { char: IMPROV_CHAR_NAME[state.char] || state.char, persona: NPC_PERSONA[IMPROV_PERSONA_BY_NAME[who]] || '' };
+  const step2 = async () => {
     const text = input.value.trim();
     if (!text || storyImprov.busy) return;
     input.value = '';
     if (!webllm.ready && navigator.gpu) { if (st) st.textContent = 'AI 読み込み中…'; await loadBrowserAI(); }
     if (!webllm.ready) { if (st) st.textContent = 'AI 起動が必要（WebGPU）'; return; }
     storyImprov.busy = true;
-    const step = (typeof stepAt === 'function') ? stepAt(sceneOf(state.sceneId), state.beat) : {};
-    const who = step.who || '';
-    const ctx = { char: IMPROV_CHAR_NAME[state.char] || state.char, who: who, npcId: IMPROV_PERSONA_BY_NAME[who] || '', scene: state.sceneId, line: step.sayJa || '' };
-    storyImprov.lines.push('▶ ' + ctx.char + '：' + text);
-    if (st) st.textContent = '……その場が応じる';
-    render();
+    if (st) st.textContent = '……物語が動く';
     try {
-      const reply = await runBrowserStoryImprov(ctx, text);
-      storyImprov.lines.push(reply);
-      render();
-      // paint a background for the moment (English scene descriptor via sbSceneEn)
-      const bgp = (typeof sbSceneEn === 'function') ? sbSceneEn(reply + ' ' + text) : 'an ancient Chinese scene, banners';
+      ctx.history = storyImprov.history;
+      const beat = await runBrowserStoryContinue(ctx, text);
+      storyImprov.history.push({ role: 'user', content: text });
+      storyImprov.history.push({ role: 'assistant', content: beat });
+      state = update({ tag: 'improvBeat', text: beat }, state);  // the new beat IS the story now
+      persist(state); render();
+      const bgp = (typeof sbSceneEn === 'function') ? sbSceneEn(beat + ' ' + text) : 'an ancient Chinese scene, banners';
       genStoryBg(bgp).then(() => render());
-    } catch (e) { storyImprov.lines.push('（応答に失敗）'); render(); }
-    if (st) st.textContent = '';
+    } catch (e) { if (st) st.textContent = '（応答に失敗）'; }
     storyImprov.busy = false;
   };
-  send.addEventListener('click', doImprov);
-  input.addEventListener('keydown', (e) => { if (e.isComposing) return; if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doImprov(); } });
+  go.addEventListener('click', step2);
+  input.addEventListener('keydown', (e) => { if (e.isComposing) return; if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); step2(); } });
 }
 
 // render() rebuilds #stage, so the freshly-created #sbScene canvas is blank
