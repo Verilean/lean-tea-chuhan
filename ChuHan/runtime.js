@@ -1026,17 +1026,21 @@ const GM_SYSTEM =
   '呂雉=冷徹、范増=老獪）と力関係、そして【差し迫る事態】に照らして結果を描け。' +
   '行動がその危機に触れるなら和らげる/悪化させるかを明示し、触れないなら危機が刻々と迫ると匂わせよ。' +
   '成功にも失敗にも代償を伴わせ、緊張を絶やすな。\n' +
+  '重要: 行動が功臣を宥める/褒賞/領地→その功臣の忠誠を上げよ(loyalty +)。冷遇/疑う/兵を削ぐ→下げよ(-)。' +
+  '兵糧を確保/略奪→supply +、浪費/長征→-。行動に応じて必ず action を返し、盤面と危機を実際に動かせ。\n' +
   '地域ID: guanzhong xianyang hanzhong bashu pengcheng wei zhao qi / 勢力ID: han chu qin lords\n' +
   '返答は必ず次のJSON1行のみ（前後に何も付けない）:\n' +
-  '{"narration":"日本語60-160字。結果を描き、最後に次の緊張を一言","deltas":[{"region":"地域ID","dCtrl":-25〜25の整数,"owner":"勢力ID(領有が変わる時だけ)"}]}';
+  '{"narration":"日本語60-160字。結果を描き、最後に次の緊張を一言",' +
+  '"deltas":[{"region":"地域ID","dCtrl":-25〜25の整数,"owner":"勢力ID(領有が変わる時だけ)"}],' +
+  '"action": null または {"type":"loyalty","who":"功臣名","d":-30〜30} / {"type":"supply","d":-30〜30} / {"type":"expedition","target":"地名"} / {"type":"rebellion","who":"功臣名"}}';
 
 // Proactive scene narrator: given the board + recent events + the looming
 // threat, paints the moment and ends on "どうする?" — turns 季を進める into
 // an LLM-authored event beat (情景描写) instead of a flat table line.
 const GM_SCENE_SYSTEM =
-  'あなたは楚漢戦争の講談師にして冷徹なゲームマスター。与えられた盤面・直近の動き・差し迫る事態から、' +
-  '今この瞬間の情景を五感で一段落（60-140字・日本語）描け。危機が迫るなら不吉さを、好機なら誘惑を滲ませ、' +
-  '必ず最後を「――さあ、どうする？」で締めよ。説明・箇条書き・JSONは禁止、物語の地の文のみ。';
+  'あなたは楚漢戦争の講談師。今の盤面と差し迫る事態から、情景を簡潔に描く。' +
+  '厳守: 日本語で1〜2文・合計80字以内。難語・外国語・過剰な比喩を避け、平易に。' +
+  '最後は必ず「――さあ、どうする？」で締める。説明・箇条書き・JSON・繰り返しは禁止。';
 
 let webllm = { engine: null, mod: null, ready: false, loading: false };
 
@@ -1114,10 +1118,22 @@ async function runBrowserGMScene(world, boardSnap) {
         { role: 'system', content: GM_SCENE_SYSTEM },
         { role: 'user', content: '【盤面】\n' + (boardSnap || '') + '\n【直近の動き】\n' + recent + threatLine + '\n\nこの局面の情景を描け。' }
       ],
-      temperature: 0.9, max_tokens: 240
+      temperature: 0.6, max_tokens: 130
     });
-    return (r.choices[0].message.content || '').trim();
+    return trimScene(r.choices[0].message.content || '');
   } catch (e) { return ''; }
+}
+
+// The 3B model tends to ramble; clamp to ~2 sentences and guarantee the
+// "どうする?" hook so the beat stays a tight prompt-for-improvisation.
+function trimScene(s) {
+  let t = (s || '').trim();
+  const cut = t.indexOf('さあ、どうする');
+  if (cut >= 0) t = t.slice(0, cut).trim();       // drop anything after the hook
+  const parts = t.split(/(?<=。)/).filter(x => x.trim());
+  t = parts.slice(0, 2).join('').trim();
+  if (t.length > 110) t = t.slice(0, 108) + '…';
+  return t + '　――さあ、どうする？';
 }
 
 // Compact world summary fed to the GM (board + date + supply/fame + threat).
@@ -1125,10 +1141,31 @@ function sbSnapshot() {
   const w = state.world;
   if (!w) return '';
   const c = w.court || {}, t = c.threat;
+  const roster = (c.retainers || []).filter(r => r.alive)
+    .map(r => r.name + '(忠' + r.loyalty + '/兵' + r.troops + ')').join(' ');
   return w.regions.map(r => r.id + '(' + r.ja + '):' + r.owner + ' ' + r.ctrl + '%').join(', ')
     + ' / BCE ' + w.year + ' ' + '春夏秋冬'[w.season]
     + ' / 兵糧' + c.supply + ' 名声' + c.fame
+    + ' / 功臣: ' + roster
     + (t ? (' / ⚠差し迫る事態:' + t.label + '(猶予' + t.turnsLeft + ')') : '');
+}
+
+// Deterministic fallback: infer a structured action from the player's free
+// text (retainer names + placate/punish/supply verbs). The 3B model rarely
+// emits the `action` field reliably, so this guarantees an improvised move
+// actually moves the crisis. Mirrors sbExpeditionIntent's keyword approach.
+function inferGmAction(text) {
+  const w = state.world;
+  if (!w || !w.court) return null;
+  const rs = (w.court.retainers || []).filter(r => r.alive);
+  const who = rs.map(r => r.name).find(n => text.includes(n)) || '';
+  const punish  = /(疑|削ぐ|兵を奪|奪っ|罷免|抑え|冷遇|警戒|遠ざけ|粛清|処断|誅|斬|殺)/.test(text);
+  const placate = /(褒賞|恩賞|領地|封じ|封ずる|厚遇|繋ぎ|宥|懐柔|報い|与え|任じ|重用|信頼|慰労|労い|盟)/.test(text);
+  if (who && punish)  return { type: 'loyalty', who: who, d: -25 };
+  if (who && placate) return { type: 'loyalty', who: who, d: 30 };
+  if (/(浪費|散財|放蕩|蕩尽)/.test(text)) return { type: 'supply', d: -20 };
+  if (/(兵糧|兵站|糧秣|糧食|補給|徴発|屯田|略奪|蓄え|兵を養|備蓄)/.test(text)) return { type: 'supply', d: 20 };
+  return null;
 }
 
 // 季を進める with an LLM event beat: run the mechanical tick (threat
@@ -1328,7 +1365,7 @@ function wireGmHandlers() {
     if (webllm.ready) {
       try {
         const r = await runBrowserGM(text, world);
-        state = update({tag: 'gmResult', narration: r.narration, deltas: r.deltas, action: r.action || null}, state);
+        state = update({tag: 'gmResult', narration: r.narration, deltas: r.deltas, action: r.action || inferGmAction(text)}, state);
         done = true;
       } catch (e) { /* fall through to server */ }
     }
@@ -1341,7 +1378,7 @@ function wireGmHandlers() {
         });
         const j = await res.json();
         if (j.error) state = update({tag: 'gmError', text: ''}, state);
-        else state = update({tag: 'gmResult', narration: j.narration || '（天は沈黙している）', deltas: j.deltas || [], action: j.action || null}, state);
+        else state = update({tag: 'gmResult', narration: j.narration || '（天は沈黙している）', deltas: j.deltas || [], action: j.action || inferGmAction(text)}, state);
         done = true;
       } catch (e) { /* 3) offline fallback */ }
     }

@@ -966,7 +966,7 @@ def sbNewThreat(world) :=
   if c.supply <= 25 then
     {kind: "supply", who: "", turnsLeft: 3,
      label: sconcat("兵糧が尽きかけている（残 ", sconcat(numStr(c.supply), "）。飢える前に手を打て。"))}
-  else if di >= 0 && rScore >= 55 then
+  else if di >= 0 && rScore >= 70 then
     (let r := arrGet(c.retainers, di);
      {kind: "retainer", who: r.name, turnsLeft: 3,
       label: sconcat(r.name, "が兵を集め、目が剣呑だ。繋ぎ止めるか、抑えるか。")})
@@ -1006,7 +1006,9 @@ def sbThreatResolved(world, t) :=
   else if t.kind == "retainer" then
     (let idx := sbRetIdxByName(c.retainers, t.who, 0);
      let r := arrGet(c.retainers, idx);
-     (r.alive == false) || (maxI(0, r.ambition + r.troops - r.loyalty) <= 35))
+     -- 生成 rScore>=70 / 解除 rScore<=50。強い忠誠付与(loyalty +30)一手で
+     -- 鎮まる幅にして、アドリブが危機に効く手応えを出す。
+     (r.alive == false) || (maxI(0, r.ambition + r.troops - r.loyalty) <= 50))
   else
     (let pf := sbPlayerFaction(world.who);
      sbCtrlSum(world.regions, sbEnemyFaction(pf), 0, 0) <= sbCtrlSum(world.regions, pf, 0, 0) + 8)
