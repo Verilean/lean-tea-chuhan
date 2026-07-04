@@ -341,7 +341,7 @@ function ensureActionOverlay() {
   ov.innerHTML =
     "<div id='actionHud' style='color:#f0e6d2;margin-bottom:6px;font-size:14px'></div>" +
     "<canvas id='actionCanvas' width='720' height='420' style='max-width:94vw;height:auto;background:#14110c;border:1px solid #4a3f2f;border-radius:8px'></canvas>" +
-    "<div style='color:#9a8d73;font-size:12px;margin-top:6px'>WASD / 矢印 = 移動 ・ J / Space = 斬撃 ・ ESC = 退却</div>" +
+    "<div style='color:#9a8d73;font-size:12px;margin-top:6px'>← → / A D = 間合い ・ J / Space = 斬りかかる ・ K / S = 受け(ガード) ・ ESC = 退却</div>" +
     "<button id='actionClose' class='btn btn-ghost' style='margin-top:8px;display:none'>戻る</button>";
   document.body.appendChild(ov);
   ov.querySelector('#actionClose').addEventListener('click', () => finishAction());
@@ -362,8 +362,8 @@ function actionFrame() {
   actionDraw(ctx, action.st, W, H);                       // compiled LeanJs
   const st = action.st;
   document.getElementById('actionHud').textContent =
-    'HP ' + Math.max(0, st.hp) + '  ・  討取 ' + st.kills + ' / ' + st.target +
-    (st.over ? (st.win ? '  ― 勝利！' : '  ― 敗走…') : '');
+    st.over ? (st.win ? '― 勝利！ 敵将を討ち取った' : '― 敗走…')
+            : (st.pName + '  ' + Math.round(st.p.hp) + '  対  ' + Math.round(st.e.hp) + '  ' + st.eName);
   if (st.over && !wasOver) showActionEnd();
   action.raf = requestAnimationFrame(actionFrame);
 }
@@ -386,7 +386,14 @@ function openAction() {
   ov.style.display = 'flex';
   ov.querySelector('#actionClose').style.display = 'none';
   const c = document.getElementById('actionCanvas');
-  action.st = actionInitState(c.width, c.height);   // compiled LeanJs
+  // 自軍将 × 敵将の名前を盤面から決める。
+  let pName = '我が将', eName = '敵将';
+  try {
+    const pf = sbPlayerFaction(state.world.who);
+    const ef = (pf === 'han') ? 'chu' : 'han';
+    pName = state.world.who; eName = sbNotableLabel(ef);
+  } catch (e) {}
+  action.st = actionInitState(c.width, c.height, pName, eName);   // compiled LeanJs
   action.keys = {};
   if (!action.kb){ document.addEventListener('keydown', actionKeyDown); document.addEventListener('keyup', actionKeyUp); action.kb = true; }
   action.raf = requestAnimationFrame(actionFrame);

@@ -248,10 +248,12 @@ def drawBattle(ctx, w, h, b) := do
 -- ── 一兵士アクション: シミュレーション + 描画(ロジックは LeanJs、
 -- rAF・キー入力・overlay は runtime.js が持つ)──────────────────────
 
--- 初期状態(canvas 中央、HP100、討取目標15)。
-def actionInitState(w, h) :=
-  {px: w / 2, py: h / 2, hp: 100, fx: 1, fy: 0, cd: 0, slash: 0,
-   enemies: [], kills: 0, target: 15, spawnT: 0, over: false, win: false}
+-- 初期状態: 1対1の対戦格闘。自軍将 pn(左) × 敵将 en(右)、各 HP100。
+def actionInitState(w, h, pn, en) :=
+  {ground: h - 66, pName: pn, eName: en,
+   p: {x: w * 0.28, hp: 100, atk: 0, cd: 0, guard: false, stun: 0, face: 1, hurt: 0},
+   e: {x: w * 0.72, hp: 100, atk: 0, cd: 0, guard: false, stun: 0, face: 0 - 1, hurt: 0, ai: 20, act: 0},
+   over: false, win: false}
 
 -- 画面端のランダムな位置に敵を1体生成。
 def actionSpawnEnemy(w, h) :=
@@ -265,93 +267,133 @@ def actionSpawnEnemy(w, h) :=
            else mathRandom() * h;
   {x: x, y: y, hp: 2, hit: 0}
 
--- 1フレーム分の状態遷移。keys は runtime.js の action.keys。
+-- 1フレーム分の状態遷移(1対1格闘)。keys は runtime.js の action.keys。
+-- 攻撃は atk タイマーで表現し、atk==12 の1フレームだけを命中判定に使う
+-- (多段ヒット防止)。ガード中は移動・攻撃不可、被弾でスタン+ノックバック。
 def actionStep(st, keys, w, h) :=
   if st.over then st
   else do
-    let mx := (if keyDown(keys, "d") == 1 || keyDown(keys, "arrowright") == 1 then 1 else 0)
-            - (if keyDown(keys, "a") == 1 || keyDown(keys, "arrowleft") == 1 then 1 else 0);
-    let my := (if keyDown(keys, "s") == 1 || keyDown(keys, "arrowdown") == 1 then 1 else 0)
-            - (if keyDown(keys, "w") == 1 || keyDown(keys, "arrowup") == 1 then 1 else 0);
-    let moving := mx != 0 || my != 0;
-    let ml := if moving then mathHypot(mx, my) else 1;
-    let fx := if moving then mx / ml else st.fx;
-    let fy := if moving then my / ml else st.fy;
-    let px := mathMax(10, mathMin(w - 10, if moving then st.px + mx / ml * 3.4 else st.px));
-    let py := mathMax(10, mathMin(h - 10, if moving then st.py + my / ml * 3.4 else st.py));
-    let cdDec := if st.cd > 0 then st.cd - 1 else 0;
-    let slashDec := if st.slash > 0 then st.slash - 1 else 0;
-    let ne := arrLen(st.enemies);
-    let canSpawn := ne < 8 && (st.kills + ne) < st.target + 6;
-    let spawnTa := if canSpawn then st.spawnT - 1 else st.spawnT;
-    let doSpawn := canSpawn && spawnTa <= 0;
-    let spawnT := if doSpawn then 26 else spawnTa;
-    let baseEnemies := if doSpawn then arrPush(st.enemies, actionSpawnEnemy(w, h)) else st.enemies;
-    -- 敵AI(player を追う)+ 接触ダメージ
-    let mut hp := st.hp;
-    let mut moved := [];
-    for e in baseEnemies do (
-      let dx := px - e.x;
-      let dy := py - e.y;
-      let dRaw := mathHypot(dx, dy);
-      let d := if dRaw == 0 then 1 else dRaw;
-      let e2hit := if e.hit > 0 then e.hit - 1 else 0;
-      let hurt := d < 14 && e2hit == 0;
-      hp := if hurt then hp - 6 else hp;
-      moved := arrPush(moved, {x: e.x + dx / d * 1.5, y: e.y + dy / d * 1.5,
-                               hp: e.hp, hit: if hurt then 30 else e2hit})
-    );
-    -- 斬撃(J / Space、クールダウン0のとき)
-    let slashing := (keyDown(keys, "j") == 1 || keyDown(keys, " ") == 1) && cdDec == 0;
-    let cd := if slashing then 16 else cdDec;
-    let slashTimer := if slashing then 8 else slashDec;
-    let ax := px + fx * 22;
-    let ay := py + fy * 22;
-    let mut slashed := [];
-    for e in moved do (
-      let hitBySlash := slashing && mathHypot(e.x - ax, e.y - ay) < 26;
-      slashed := arrPush(slashed, {x: e.x, y: e.y,
-                                   hp: if hitBySlash then e.hp - 1 else e.hp,
-                                   hit: if hitBySlash then 8 else e.hit})
-    );
-    -- 討取(HP0以下)を除いて数える
-    let mut kills := st.kills;
-    let mut live := [];
-    for e in slashed do (
-      let alive := e.hp > 0;
-      kills := if alive then kills else kills + 1;
-      live := if alive then arrPush(live, e) else live
-    );
-    let win := kills >= st.target;
-    let dead := hp <= 0;
-    {px: px, py: py, hp: if dead then 0 else hp, fx: fx, fy: fy,
-     cd: cd, slash: slashTimer, enemies: live, kills: kills,
-     target: st.target, spawnT: spawnT, over: win || dead, win: win}
+    let reach := 60;
+    let spd := 3.6;
+    let p := st.p;
+    let e := st.e;
+    let dist := if e.x > p.x then e.x - p.x else p.x - e.x;
+    let pFace := if e.x > p.x then 1 else 0 - 1;
+    let eFace := if p.x > e.x then 1 else 0 - 1;
+    -- ── 自機入力 ──
+    let kL := keyDown(keys, "a") == 1 || keyDown(keys, "arrowleft") == 1;
+    let kR := keyDown(keys, "d") == 1 || keyDown(keys, "arrowright") == 1;
+    let pGuard := keyDown(keys, "k") == 1 || keyDown(keys, "s") == 1 || keyDown(keys, "arrowdown") == 1;
+    let pAtkKey := keyDown(keys, "j") == 1 || keyDown(keys, " ") == 1;
+    let pBusy := p.stun > 0 || p.atk > 0;
+    let pmx := if pBusy || pGuard then 0 else (if kR then 1 else 0) - (if kL then 1 else 0);
+    let pKnock := if p.stun > 0 then (0 - pFace) * 2 else 0;
+    let px := mathMax(36, mathMin(w - 36, p.x + pmx * spd + pKnock));
+    let pWantAtk := pAtkKey && p.cd == 0 && p.stun == 0 && (pGuard == false) && (p.atk == 0);
+    let pAtk := if pWantAtk then 16 else (if p.atk > 0 then p.atk - 1 else 0);
+    let pCd := if pWantAtk then 26 else (if p.cd > 0 then p.cd - 1 else 0);
+    -- ── 敵AI: ai タイマーで意思決定を保持(接近0/攻撃1/ガード2)──
+    let reDecide := e.ai <= 0 && e.stun <= 0 && e.atk <= 0;
+    let roll := mathFloor(mathRandom() * 100);
+    let newAct := if dist > reach then 0
+                  else if roll < 46 then 1
+                  else if roll < 74 then 2
+                  else 0;
+    let act := if reDecide then newAct else e.act;
+    let eGuard := act == 2 && e.stun <= 0 && e.atk <= 0;
+    let eMove := if (e.stun > 0) || (e.atk > 0) || eGuard then 0 else (if act == 0 then eFace else 0);
+    let eKnock := if e.stun > 0 then (0 - eFace) * 2 else 0;
+    let ex := mathMax(36, mathMin(w - 36, e.x + eMove * (spd - 1.3) + eKnock));
+    let eWantAtk := act == 1 && e.stun <= 0 && e.atk == 0 && e.cd == 0 && dist < reach + 6;
+    let eAtk := if eWantAtk then 16 else (if e.atk > 0 then e.atk - 1 else 0);
+    let eCd := if eWantAtk then 30 else (if e.cd > 0 then e.cd - 1 else 0);
+    let aiNext := if reDecide then (if act == 1 then 18 else if act == 2 then 24 else 14)
+                  else (if e.ai > 0 then e.ai - 1 else 0);
+    -- ── 命中判定(atk==12 の瞬間・射程内)──
+    let pHits := pAtk == 12 && dist <= reach;
+    let eHits := eAtk == 12 && dist <= reach;
+    let eDmg := if pHits then (if eGuard then 2 else 12) else 0;
+    let pDmg := if eHits then (if pGuard then 2 else 12) else 0;
+    let eStun := if pHits && (eGuard == false) then 20 else (if e.stun > 0 then e.stun - 1 else 0);
+    let pStun := if eHits && (pGuard == false) then 20 else (if p.stun > 0 then p.stun - 1 else 0);
+    let eHp := mathMax(0, e.hp - eDmg);
+    let pHp := mathMax(0, p.hp - pDmg);
+    let pHurt := if pDmg > 0 then 8 else (if p.hurt > 0 then p.hurt - 1 else 0);
+    let eHurt := if eDmg > 0 then 8 else (if e.hurt > 0 then e.hurt - 1 else 0);
+    let pWin := eHp <= 0;
+    let pLose := pHp <= 0;
+    {ground: st.ground, pName: st.pName, eName: st.eName,
+     p: {x: px, hp: pHp, atk: pAtk, cd: pCd, guard: pGuard, stun: pStun, face: pFace, hurt: pHurt},
+     e: {x: ex, hp: eHp, atk: eAtk, cd: eCd, guard: eGuard, stun: eStun, face: eFace, hurt: eHurt, ai: aiNext, act: act},
+     over: pWin || pLose, win: pWin}
 
--- アクション画面の描画(敵・斬撃弧・自機)。HUD は runtime.js。
+-- 力士1体を棒人間で描く。攻撃中は前方へ武器を突き出し、ガードで盾弧。
+def figDraw(ctx, f, color, groundY) := do
+  let x := f.x;
+  let y := groundY;
+  let striking := f.atk <= 14 && f.atk >= 6;
+  let _ := ctxGlobalAlpha(ctx, if f.hurt > 0 then 0.55 else 1);
+  let _ := ctxSetStroke(ctx, color);
+  let _ := ctxSetLineWidth(ctx, 4);
+  -- 脚
+  let _ := ctxBeginPath(ctx);
+  let _ := ctxMoveTo(ctx, x, y - 28);
+  let _ := ctxLineTo(ctx, x - 9, y);
+  let _ := ctxMoveTo(ctx, x, y - 28);
+  let _ := ctxLineTo(ctx, x + 9, y);
+  -- 胴
+  let _ := ctxMoveTo(ctx, x, y - 28);
+  let _ := ctxLineTo(ctx, x, y - 60);
+  let _ := ctxStroke(ctx);
+  -- 頭
+  let _ := ctxSetFill(ctx, color);
+  let _ := ctxBeginPath(ctx);
+  let _ := ctxArc(ctx, x, y - 69, 9, 0, 6.29);
+  let _ := ctxFill(ctx);
+  -- 腕/武器
+  let ext := if striking then 44 else 15;
+  let _ := ctxSetStroke(ctx, if striking then "#ffd54a" else color);
+  let _ := ctxSetLineWidth(ctx, if striking then 5 else 3);
+  let _ := ctxBeginPath(ctx);
+  let _ := ctxMoveTo(ctx, x, y - 52);
+  let _ := ctxLineTo(ctx, x + f.face * ext, y - 52 - (if striking then 4 else 8));
+  let _ := ctxStroke(ctx);
+  -- ガード(盾)
+  let _ := if f.guard then (
+    let _ := ctxSetStroke(ctx, "#9fc4ff");
+    let _ := ctxSetLineWidth(ctx, 3);
+    let _ := ctxBeginPath(ctx);
+    let _ := ctxMoveTo(ctx, x + f.face * 14, y - 62);
+    let _ := ctxLineTo(ctx, x + f.face * 14, y - 34);
+    ctxStroke(ctx)
+  ) else null;
+  ctxGlobalAlpha(ctx, 1)
+
+-- アクション画面の描画(HPバー・地面・両力士)。HUD は runtime.js。
 def actionDraw(ctx, st, w, h) := do
   let _ := ctxSetFill(ctx, "#14110c");
   let _ := ctxFillRect(ctx, 0, 0, w, h);
-  let _ := ctxSetFill(ctx, "#ff5a4d");
-  for e in st.enemies do (
-    let _ := ctxGlobalAlpha(ctx, if e.hit > 0 then 0.6 else 1);
-    let _ := ctxBeginPath(ctx);
-    let _ := ctxArc(ctx, e.x, e.y, 6, 0, 6.29);
-    ctxFill(ctx)
-  );
-  let _ := ctxGlobalAlpha(ctx, 1);
-  let _ := if st.slash > 0 then (
-    let _ := ctxSetStroke(ctx, "#ffd54a");
-    let _ := ctxSetLineWidth(ctx, 3);
-    let _ := ctxBeginPath(ctx);
-    let a := mathAtan2(st.fy, st.fx);
-    let _ := ctxArc(ctx, st.px, st.py, 24, a - 0.7, a + 0.7);
-    ctxStroke(ctx)
-  ) else null;
+  let _ := ctxSetFill(ctx, "#241d13");
+  let _ := ctxFillRect(ctx, 0, st.ground, w, h - st.ground);
+  -- HP バー
+  let _ := ctxSetFill(ctx, "#3a2a2a");
+  let _ := ctxFillRect(ctx, 20, 18, 300, 15);
+  let _ := ctxFillRect(ctx, w - 320, 18, 300, 15);
   let _ := ctxSetFill(ctx, "#4d8cff");
-  let _ := ctxBeginPath(ctx);
-  let _ := ctxArc(ctx, st.px, st.py, 8, 0, 6.29);
-  ctxFill(ctx)
+  let _ := ctxFillRect(ctx, 20, 18, 300 * st.p.hp / 100, 15);
+  let _ := ctxSetFill(ctx, "#ff5a4d");
+  let _ := ctxFillRect(ctx, w - 20 - 300 * st.e.hp / 100, 18, 300 * st.e.hp / 100, 15);
+  -- 名前
+  let _ := ctxSetFill(ctx, "#f0e6d2");
+  let _ := ctxSetFont(ctx, "14px serif");
+  let _ := ctxSetTextAlign(ctx, "left");
+  let _ := ctxFillText(ctx, st.pName, 20, 48);
+  let _ := ctxSetTextAlign(ctx, "right");
+  let _ := ctxFillText(ctx, st.eName, w - 20, 48);
+  let _ := ctxSetTextAlign(ctx, "left");
+  -- 両力士
+  let _ := figDraw(ctx, st.p, "#6fa8ff", st.ground);
+  figDraw(ctx, st.e, "#ff7a6a", st.ground)
 
 -- ── 群衆シミュ(わさわさ)の編成管理 + 毎フレーム移動 ────────────
 -- 名のある将(勢力ごと1体、実際に領地を持つ勢力にだけ出る)。
