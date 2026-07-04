@@ -528,30 +528,52 @@ function armyStrength(faction) {
   return state.world ? sbArmyStrength(state.world, faction) : 20;
 }
 
+// A readable clash: 漢(blue, left) and the enemy(red, right) advance,
+// MEET at a front line (highlighted band) and fight THERE — they don't
+// pass through. Casualties fall at the line (flash + fade), weighted
+// against the weaker army, and the stronger side pushes the line into
+// enemy ground. Who's winning is visible: the losing colour thins and
+// the line sits in their territory. hanN/chuN come from actual control.
 function battle2D(canvas, hanN, chuN) {
   const ctx = canvas.getContext('2d'); const W = canvas.width, H = canvas.height;
-  const N = Math.min(2400, Math.round((hanN + chuN) * 4));
-  const hanShare = hanN / (hanN + chuN);
+  const total = Math.max(1, hanN + chuN);
+  const hanShare = hanN / total;
+  const push = (hanShare - 0.5) * 2;                 // -1..1, han advantage
+  const N = Math.min(1500, Math.round(total * 4));
+  const hanCount = Math.round(N * hanShare);
   const sol = [];
   for (let i = 0; i < N; i++) {
-    const side = (i / N) < hanShare ? 0 : 1;
+    const side = i < hanCount ? 0 : 1;               // 0=han(left) 1=enemy(right)
     sol.push({
-      x: side ? W*0.72 + Math.random()*W*0.24 : W*0.04 + Math.random()*W*0.24,
-      y: 30 + Math.random()*(H-60), side, seed: Math.random(), dead: false
+      side,
+      x: side ? W*0.70 + Math.random()*W*0.28 : W*0.02 + Math.random()*W*0.28,
+      y: 16 + Math.random()*(H-32), seed: Math.random(), hp: 1, flash: 0
     });
   }
   const t0 = performance.now();
   return () => {
-    const t = (performance.now() - t0)/1000; const clash = Math.min(t/6, 1);
+    const t = (performance.now() - t0)/1000;
+    const closing = Math.min(t/2, 1);                // armies close over ~2s
+    const frontX = W*0.5 + push * W*0.32 * Math.min(t/8, 1);  // line drifts to the weaker side
     ctx.fillStyle = '#0d0b08'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = 'rgba(255,210,90,0.12)'; ctx.fillRect(frontX-5, 0, 10, H);  // front-line band
     for (const s of sol) {
-      if (s.dead) continue;
-      s.x += (s.side ? -1 : 1) * (0.5 + s.seed) * 1.3;
-      s.x = Math.max(W*0.05, Math.min(W*0.95, s.x));
-      const near = 1 - Math.abs(s.x - W*0.5)/(W*0.5);
-      if (s.seed < clash * near * 0.9) { s.dead = true; continue; }
+      if (s.hp <= 0) {
+        if (s.flash > 0) { s.flash -= 0.05; ctx.fillStyle = 'rgba(255,190,110,'+Math.max(0,s.flash)+')'; ctx.fillRect(s.x-1.5, s.y-1.5, 3, 3); }
+        continue;
+      }
+      const target = frontX + (s.side ? 7 : -7);
+      const atLine = s.side ? (s.x <= target) : (s.x >= target);
+      if (!atLine) {
+        s.x += (s.side ? -1 : 1) * (0.6 + s.seed) * 1.7 * closing;
+      } else {
+        const losing = s.side ? (push > 0) : (push < 0);
+        const risk = 0.008 + (losing ? 0.012 + Math.abs(push)*0.02 : 0.004);
+        if (Math.random() < risk * closing) { s.hp = 0; s.flash = 1; continue; }
+        s.x += (Math.random()-0.5)*1.0;              // jostle at the clash
+      }
       ctx.fillStyle = s.side ? '#ff5a4d' : '#4d8cff';
-      ctx.fillRect(s.x, s.y + Math.sin(t*3 + s.seed*30)*2, 2.6, 2.6);
+      ctx.fillRect(s.x, s.y + Math.sin(t*3 + s.seed*30)*1.4, 3, 3);
     }
   };
 }
@@ -636,13 +658,11 @@ function openBattle() {
   ov.style.display = 'flex';
   const c = ov.querySelector('#battleCanvas2');
   const hanN = armyStrength('han'), chuN = armyStrength('chu');
-  const start2D = () => { battle.render = battle2D(c, hanN, chuN); battle.starting = false; battleLoop(); };
-  (async () => {
-    let r = null;
-    try { r = await battleWebGPU(c, hanN, chuN); } catch (e) { r = null; }
-    if (r) { battle.render = r; battle.starting = false; battleLoop(); }
-    else start2D();
-  })();
+  // Use the clear Canvas-2D clash. The WebGPU shader (battleWebGPU, kept
+  // below) read as meaningless dots crossing, so it's no longer default.
+  battle.render = battle2D(c, hanN, chuN);
+  battle.starting = false;
+  battleLoop();
 }
 function closeBattle() {
   const ov = document.getElementById('battleOverlay');
@@ -998,7 +1018,10 @@ function wireGmHandlers() {
   };
   send.addEventListener('click', doSend);
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+    // Send only on Ctrl/⌘+Enter — plain Enter fights the IME's
+    // confirm-conversion key (that was clearing the field mid-typing).
+    if (e.isComposing) return;
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doSend(); }
   });
 }
 
@@ -1176,6 +1199,11 @@ stage.addEventListener('click', (e) => {
 
 // Keyboard: space/enter advances dialogue; arrow keys in battle.
 document.addEventListener('keydown', (e) => {
+  // Don't hijack Space/Enter while the player is typing in a field (the
+  // free-text GM input etc.) or mid-IME-composition — that was resetting
+  // the input on every space/enter. Let the field handle its own keys.
+  const t = e.target;
+  if (e.isComposing || (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable))) return;
   if (e.key === ' ' || e.key === 'Enter') {
     e.preventDefault();
     const prevPhase = state.phase;

@@ -1319,49 +1319,55 @@ def viewSandbox(state) :=
   let pend := if w.pending == 1
     then "<div style='color:#ffd54a;margin:8px 0'>……軍師が知恵を絞っている</div>"
     else "";
+  let controls := if hasDrama then sbDramaPanel(w.court.drama)
+    else sjoin([
+      "<input id='gmInput' placeholder='劉邦として何をする? 例: エジプトを目指す' ",
+      "style='width:100%;padding:9px;background:#0f0d0a;border:1px solid #4a3f2f;color:#eee;border-radius:6px;box-sizing:border-box'/>",
+      "<div style='display:flex;gap:8px;margin-top:8px;flex-wrap:wrap'>",
+      "<button id='gmSend' class='btn btn-primary'>行動する（⌘/Ctrl+Enter）</button>",
+      button("primary", {tag: "sbAdvance"}, "季を進める ▶"),
+      button("primary", {tag: "sbSpecial"}, sbSpecialLabel(w.who)),
+      "<button id='sbAction' class='btn btn-primary'>🗡 出撃</button>",
+      "<button id='sbBattle' class='btn btn-ghost'>⚔ 会戦</button>",
+      "</div>",
+      sbExpPanel(w.court),
+      "<div style='display:flex;gap:8px;align-items:center;margin-top:8px;font-size:11px;color:#8a7d63;flex-wrap:wrap'>",
+      "<button id='gmLoadAI' class='btn btn-ghost' style='font-size:11px'>ブラウザAI軍師（~1GB・WebGPU）</button>",
+      "<span id='gmAiStatus'>未起動でもローカルで進行可</span></div>"
+    ]);
   sjoin([
-    "<div style='max-width:560px;margin:0 auto;padding:16px'>",
-    "<canvas id='sbAtmo' width='520' height='60' style='width:100%;max-width:540px;height:auto;display:block;margin:0 auto 8px;border-radius:8px;border:1px solid #4a3f2f'></canvas>",
-    "<div style='display:flex;justify-content:space-between;align-items:baseline'>",
-    "<h2 style='margin:0'>群雄割拠 ― ", hesc(w.who),
+    "<div style='max-width:980px;margin:0 auto;padding:12px'>",
+    "<canvas id='sbAtmo' width='520' height='44' style='width:100%;height:44px;display:block;margin-bottom:8px;border-radius:8px;border:1px solid #4a3f2f'></canvas>",
+    "<div style='display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px'>",
+    "<h2 style='margin:0;font-size:19px'>群雄割拠 ― ", hesc(w.who),
     " <span style='font-size:11px;color:#888'>", hesc(modeBadge), " β</span></h2>",
-    "<div style='color:#ffd54a;font-size:15px'>", hesc(date), "</div></div>",
-    "<div style='text-align:right;color:#9a8d73;font-size:11px;margin-top:2px'>兵糧 ",
-    numStr(w.court.supply), " ・ 名声 ", numStr(w.court.fame), "</div>",
+    "<div style='color:#ffd54a;font-size:13px'>", hesc(date),
+    " ・ 兵糧 ", numStr(w.court.supply), " ・ 名声 ", numStr(w.court.fame), "</div>",
+    "</div>",
+    -- 2カラム(広い画面では横並び、狭ければ縦積み)
+    "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;margin-top:10px;align-items:start'>",
+    -- 左:地図・勢力・功臣・群衆
+    "<div>",
     map,
     sbFactionBar(w.regions),
     sbRoster(w.court),
-    "<div style='text-align:center;color:#8a7d63;font-size:12px;margin-top:6px'>陣中 ― 兵たちが蠢く（勢力の色は支配地に比例）</div>",
-    "<canvas id='sbStage' width='520' height='150' style='width:100%;max-width:540px;height:auto;display:block;margin:4px auto 0;background:linear-gradient(#1c1811,#100e0a);border:1px solid #4a3f2f;border-radius:8px'></canvas>",
-    panel("mini", "動静", sbLog(w.log)),
-    "<div style='margin-top:10px'>",
-    "<div style='display:flex;gap:8px;align-items:center;font-size:12px;color:#9a8d73;flex-wrap:wrap'>",
-    "<button id='imgGen' class='btn btn-ghost' style='font-size:12px'>この情景を描く（SD-Turbo・WebGPU・初回DL大）</button>",
-    "<span id='imgStatus'></span></div>",
-    "<canvas id='sbScene' width='512' height='512' style='display:none;width:100%;max-width:340px;height:auto;margin:8px auto 0;border-radius:8px;border:1px solid #4a3f2f'></canvas>",
+    "<div style='text-align:center;color:#8a7d63;font-size:11px;margin-top:6px'>陣中 ― 兵たちが蠢く</div>",
+    "<canvas id='sbStage' width='520' height='150' style='width:100%;height:auto;display:block;margin:4px auto 0;background:linear-gradient(#1c1811,#100e0a);border:1px solid #4a3f2f;border-radius:8px'></canvas>",
     "</div>",
+    -- 右:動静ログ・操作・画像
+    "<div>",
     pend,
-    "<div style='margin-top:12px'>",
-    (if hasDrama then
-      sbDramaPanel(w.court.drama)
-    else sjoin([
-      "<input id='gmInput' placeholder='劉邦として何をする? 例: エジプトを目指す / 韓信を大将軍に任じる' ",
-      "style='width:100%;padding:9px;background:#0f0d0a;border:1px solid #4a3f2f;color:#eee;border-radius:6px;box-sizing:border-box'/>",
-      "<div style='display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;color:#9a8d73;flex-wrap:wrap'>",
-      "<button id='gmLoadAI' class='btn btn-ghost' style='font-size:12px'>ブラウザAI軍師を起動（初回DL ~1GB・WebGPU）</button>",
-      "<span id='gmAiStatus'>未起動でもローカルで進行可</span>",
-      "</div>",
-      "<div style='display:flex;gap:8px;margin-top:8px;flex-wrap:wrap'>",
-      "<button id='gmSend' class='btn btn-primary'>行動する（AI 軍師）</button>",
-      button("primary", {tag: "sbSpecial"}, sbSpecialLabel(w.who)),
-      button("primary", {tag: "sbAdvance"}, "季を進める（静観）▶"),
-      "<button id='sbBattle' class='btn btn-ghost'>⚔ 会戦を見る</button>",
-      "<button id='sbAction' class='btn btn-primary'>🗡 出撃（アクション）</button>",
-      "</div>",
-      sbExpPanel(w.court)
-    ])),
-    "<div style='margin-top:10px'>", button("ghost", {tag: "toTitle"}, "タイトルへ"), "</div>",
-    "</div></div>"
+    "<div style='margin-bottom:10px'>", controls, "</div>",
+    panel("mini", "動静", sbLog(w.log)),
+    "<details style='margin-top:8px'><summary style='cursor:pointer;color:#8a7d63;font-size:12px'>🎨 この情景を描く（実験的・WebGPU）</summary>",
+    "<div style='display:flex;gap:8px;align-items:center;margin-top:6px;font-size:12px;color:#9a8d73;flex-wrap:wrap'>",
+    "<button id='imgGen' class='btn btn-ghost' style='font-size:12px'>描く</button><span id='imgStatus'></span></div>",
+    "<canvas id='sbScene' width='512' height='512' style='display:none;width:100%;max-width:300px;height:auto;margin:8px auto 0;border-radius:8px;border:1px solid #4a3f2f'></canvas>",
+    "</details>",
+    "</div>",
+    "</div>",
+    "<div style='margin-top:12px;text-align:center'>", button("ghost", {tag: "toTitle"}, "タイトルへ"), "</div>",
+    "</div>"
   ])
 
 -- BGM for the current state — phase has priority over scene bg.

@@ -9,7 +9,9 @@
     html, body { margin: 0; height: 100%; overflow: hidden;
                  background: #0a0a0a; color: #e7e2d1;
                  font-family: 'YuMincho', 'Hiragino Mincho ProN', serif; }
-    #stage { position: relative; width: 100vw; height: 100vh; }
+    /* #stage is the scroll container: VN scenes fit one screen (no
+       scrollbar), while the tall sandbox view scrolls within it. */
+    #stage { position: relative; width: 100vw; height: 100vh; overflow-y: auto; overflow-x: hidden; }
 
     /* ── Button kit ──────────────────────────────────────────────
        Every interactive control comes from button()/buttonMod()/
