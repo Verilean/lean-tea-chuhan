@@ -1286,7 +1286,19 @@ def viewScene(state) :=
     renderSprites(step),
     renderChoices(state, step),
     renderDialogueBox(state, step),
-    "</div>"
+    "</div>",
+    -- アドリブ: 台本に割り込んで自由に動く。人物がAIで応じ、背景も生成される。
+    -- .scene-bg の外(兄弟)に置くことで、タップ送りが誤発火しない。
+    "<div id='improvBar' style='position:fixed;left:12px;bottom:12px;z-index:45;max-width:420px'>",
+    "<details style='background:rgba(10,8,6,0.92);border:1px solid #6a4a2f;border-radius:8px;padding:8px 10px;color:#e8dcc0'>",
+    "<summary style='cursor:pointer;font-size:12px;color:#c8a86a'>✍ アドリブ ― この場に割り込む（AI応答・背景生成）</summary>",
+    "<div id='improvLog' style='max-height:120px;overflow-y:auto;font-size:12px;margin:6px 0;color:#d8cbb0'></div>",
+    "<input id='improvInput' placeholder='この場で何を言う・する?' style='width:100%;padding:6px;background:#0f0d0a;border:1px solid #4a3f2f;color:#eee;border-radius:5px;box-sizing:border-box'/>",
+    "<div style='display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap'>",
+    "<button id='improvSend' class='btn btn-primary' style='font-size:12px'>割り込む（⌘/Ctrl+Enter）</button>",
+    "<button id='improvLoadAI' class='btn btn-ghost' style='font-size:11px'>AI起動</button>",
+    "<span id='improvStatus' style='font-size:11px;color:#8a7d63'></span>",
+    "</div></details></div>"
   ])
 
 -- Ending screen

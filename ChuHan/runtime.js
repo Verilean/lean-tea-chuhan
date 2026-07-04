@@ -321,6 +321,7 @@ function render() {
   wireAtmo();
   wireBattle();
   wireImgGen();
+  wireStoryImprov();
   wireAction();
 }
 
@@ -547,54 +548,59 @@ async function imgEmbed(text) {
   return out[imggen.enc.outputNames[0]];   // last_hidden_state [1,77,1024]
 }
 
+// Core WebGPU txt2img: prompt → 512x512 ImageData. Assumes imggen.ready.
+// Shared by the sandbox scene (#sbScene) and the story background painter.
+async function imgGenerate(prompt) {
+  const Tensor = imggen.ort.Tensor;
+  const H = 512, W = 512, LH = 64, LW = 64, C = 4, n = C * LH * LW, guidance = 7.5;
+  const condE = await imgEmbed(prompt);
+  const uncondE = await imgEmbed('lowres, blurry, ugly, deformed, text, watermark');
+  const { sigmas, initNoiseSigma } = imgSetTimesteps(IMG_STEPS);
+  const lat = new Float32Array(n);
+  let seed = ((Date.now() & 0xffff) ^ 0x9e37) >>> 0;
+  const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; const u1 = (seed >>> 8) / 16777216; seed = (seed * 1664525 + 1013904223) >>> 0; const u2 = (seed >>> 8) / 16777216; return Math.sqrt(-2 * Math.log(u1 + 1e-9)) * Math.cos(6.283185 * u2); };
+  for (let i = 0; i < n; i++) lat[i] = rnd() * initNoiseSigma;
+  for (let s = 0; s < IMG_STEPS; s++) {
+    const sigma = sigmas[s], cIn = 1 / Math.sqrt(sigma * sigma + 1);
+    const scaled = new Float32Array(n); for (let i = 0; i < n; i++) scaled[i] = lat[i] * cIn;
+    const sample = new Tensor('float32', scaled, [1, C, LH, LW]);
+    const ts = new Tensor('float32', Float32Array.from([imgSigmaToT(sigma)]), [1]);
+    const rc = await imggen.unet.run({ sample, timestep: ts, encoder_hidden_states: condE });
+    const ru = await imggen.unet.run({ sample, timestep: ts, encoder_hidden_states: uncondE });
+    const nc = rc[imggen.unet.outputNames[0]].data, nu = ru[imggen.unet.outputNames[0]].data;
+    const dt = sigmas[s + 1] - sigma;
+    for (let i = 0; i < n; i++) {
+      const noise = nu[i] + guidance * (nc[i] - nu[i]);
+      const denoised = lat[i] - sigma * noise;            // x0 prediction
+      lat[i] = lat[i] + ((lat[i] - denoised) / sigma) * dt; // Euler step
+    }
+    imgStatus('描画 ' + (s + 1) + '/' + IMG_STEPS);
+  }
+  const dl = new Float32Array(n); for (let i = 0; i < n; i++) dl[i] = lat[i] / 0.18215;
+  const dec = await imggen.vae.run({ latent_sample: new Tensor('float32', dl, [1, C, LH, LW]) });
+  const px = dec[imggen.vae.outputNames[0]].data;          // [1,3,512,512] in [-1,1]
+  const out = new Uint8ClampedArray(W * H * 4), plane = W * H;
+  for (let i = 0; i < plane; i++) {
+    out[i * 4] = (px[i] * 0.5 + 0.5) * 255;
+    out[i * 4 + 1] = (px[plane + i] * 0.5 + 0.5) * 255;
+    out[i * 4 + 2] = (px[2 * plane + i] * 0.5 + 0.5) * 255;
+    out[i * 4 + 3] = 255;
+  }
+  return new ImageData(out, W, H);
+}
+
 async function genScene() {
   if (imggen.busy) return;
   if (!imggen.ready) { const ok = await loadImgGen(); if (!ok) return; }
   imggen.busy = true;
   imgStatus('筆を執っている…');
   try {
-    const Tensor = imggen.ort.Tensor;
-    const H = 512, W = 512, LH = 64, LW = 64, C = 4, n = C * LH * LW, guidance = 7.5;
-    const condE = await imgEmbed(scenePrompt());
-    const uncondE = await imgEmbed('lowres, blurry, ugly, deformed, text, watermark');
-    const { sigmas, initNoiseSigma } = imgSetTimesteps(IMG_STEPS);
-    // init latents ~ N(0,1) * initNoiseSigma (deterministic LCG-Gaussian)
-    const lat = new Float32Array(n);
-    let seed = ((Date.now() & 0xffff) ^ 0x9e37) >>> 0;
-    const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; const u1 = (seed >>> 8) / 16777216; seed = (seed * 1664525 + 1013904223) >>> 0; const u2 = (seed >>> 8) / 16777216; return Math.sqrt(-2 * Math.log(u1 + 1e-9)) * Math.cos(6.283185 * u2); };
-    for (let i = 0; i < n; i++) lat[i] = rnd() * initNoiseSigma;
-    for (let s = 0; s < IMG_STEPS; s++) {
-      const sigma = sigmas[s], cIn = 1 / Math.sqrt(sigma * sigma + 1);
-      const scaled = new Float32Array(n); for (let i = 0; i < n; i++) scaled[i] = lat[i] * cIn;
-      const sample = new Tensor('float32', scaled, [1, C, LH, LW]);
-      const ts = new Tensor('float32', Float32Array.from([imgSigmaToT(sigma)]), [1]);
-      const rc = await imggen.unet.run({ sample, timestep: ts, encoder_hidden_states: condE });
-      const ru = await imggen.unet.run({ sample, timestep: ts, encoder_hidden_states: uncondE });
-      const nc = rc[imggen.unet.outputNames[0]].data, nu = ru[imggen.unet.outputNames[0]].data;
-      const dt = sigmas[s + 1] - sigma;
-      for (let i = 0; i < n; i++) {
-        const noise = nu[i] + guidance * (nc[i] - nu[i]);
-        const denoised = lat[i] - sigma * noise;            // x0 prediction
-        lat[i] = lat[i] + ((lat[i] - denoised) / sigma) * dt; // Euler step
-      }
-      imgStatus('描画 ' + (s + 1) + '/' + IMG_STEPS);
-    }
-    const dl = new Float32Array(n); for (let i = 0; i < n; i++) dl[i] = lat[i] / 0.18215;
-    const dec = await imggen.vae.run({ latent_sample: new Tensor('float32', dl, [1, C, LH, LW]) });
-    const px = dec[imggen.vae.outputNames[0]].data;         // [1,3,512,512] in [-1,1]
+    const img = await imgGenerate(scenePrompt());
+    imggen.lastImg = img;
     const canvas = document.getElementById('sbScene');
     if (canvas) {
-      const out = new Uint8ClampedArray(W * H * 4), plane = W * H;
-      for (let i = 0; i < plane; i++) {
-        out[i * 4] = (px[i] * 0.5 + 0.5) * 255;
-        out[i * 4 + 1] = (px[plane + i] * 0.5 + 0.5) * 255;
-        out[i * 4 + 2] = (px[2 * plane + i] * 0.5 + 0.5) * 255;
-        out[i * 4 + 3] = 255;
-      }
-      const imgData = new ImageData(out, W, H);
-      imggen.lastImg = imgData;           // keep it so re-renders can restore it
-      canvas.width = W; canvas.height = H;
-      canvas.getContext('2d').putImageData(imgData, 0, 0);
+      canvas.width = 512; canvas.height = 512;
+      canvas.getContext('2d').putImageData(img, 0, 0);
       canvas.style.display = 'block';
       const det = canvas.closest('details'); if (det) det.open = true;
       imgStatus('（情景 更新）');
@@ -604,6 +610,99 @@ async function genScene() {
   } finally {
     imggen.busy = false;
   }
+}
+
+// ─── Story improv: let the player interject freely in a scripted scene.
+// The LLM responds in-character (using the scene's speaker persona) and a
+// background is painted for the moment — the story's assets, played TRPG.
+let storyImprov = { bg: null, lines: [] };
+
+async function runBrowserStoryImprov(ctx, text) {
+  const persona = NPC_PERSONA[ctx.npcId] || '';
+  const sys = 'あなたは楚漢戦争(紀元前3世紀)の講談師にして登場人物。' +
+    'プレイヤー(' + (ctx.char || '主人公') + ')が物語の一場面に割り込んで取った言動へ、' +
+    'その場の情景と人物がどう応じるかを地の文で描く。' + (persona ? ('場の人物: ' + persona + '。') : '') +
+    '厳守: 日本語で1〜2文・80字以内。人物の性格を守り、平易に。JSON・箇条書き・繰り返しは禁止。';
+  const r = await webllm.engine.chat.completions.create({
+    messages: [{ role: 'system', content: sys },
+      { role: 'user', content: '【場面】' + (ctx.scene || '') + '\n【直前の台詞】' + (ctx.line || '') + '\n【あなたの言動】' + text + '\n\nこの割り込みの帰結を描け。' }],
+    temperature: 0.8, max_tokens: 150
+  });
+  let t = (r.choices[0].message.content || '').trim();
+  const parts = t.split(/(?<=。)/).filter(x => x.trim());
+  t = parts.slice(0, 2).join('').trim();
+  return (t.length > 120 ? t.slice(0, 118) + '…' : t);
+}
+
+// Paint a story background from a prompt and pin it behind the scene.
+async function genStoryBg(promptText) {
+  if (!webllm && false) return;
+  if (imggen.busy) return;
+  if (!imggen.ready) { const ok = await loadImgGen(); if (!ok) return; }
+  imggen.busy = true;
+  try {
+    storyImprov.bg = await imgGenerate('sumi-e ink wash painting, ' + promptText + ', Chu-Han war era China 200 BCE, muted ink tones, atmospheric, cinematic');
+    applyStoryBg();
+  } catch (e) { /* leave the static bg */ } finally { imggen.busy = false; }
+}
+
+// Re-apply the painted background after a re-render (render() rebuilds #stage).
+function applyStoryBg() {
+  if (!storyImprov.bg) return;
+  const el = document.querySelector('.scene-bg');
+  if (!el) return;
+  const cv = document.createElement('canvas'); cv.width = 512; cv.height = 512;
+  cv.getContext('2d').putImageData(storyImprov.bg, 0, 0);
+  el.style.backgroundImage = 'url(' + cv.toDataURL('image/jpeg', 0.85) + ')';
+  el.style.backgroundSize = 'cover';
+  el.style.backgroundPosition = 'center';
+}
+
+const IMPROV_PERSONA_BY_NAME = { '妙容': 'miaorong', '蕭何': 'xiaohe', '范増': 'fanzeng', '黄石公': 'huangshi', '項伯': 'xiangbo', '蒯通': 'kuaitong' };
+const IMPROV_CHAR_NAME = { liubang: '劉邦', xiangyu: '項羽', hanxin: '韓信', zhangliang: '張良', xiaohe: '蕭何', fanzeng: '范増' };
+function improvEsc(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+// Story improv: interject in a scripted scene → in-character LLM reply + a
+// painted background. Wired on every scene render; the panel is a fixed
+// sibling of .scene-bg so clicks don't trigger the tap-to-advance.
+function wireStoryImprov() {
+  if (state.phase !== 'scene') return;
+  applyStoryBg();                                  // re-pin painted bg after re-render
+  const log = document.getElementById('improvLog');
+  if (log) log.innerHTML = storyImprov.lines.slice(-8).map(l => "<div style='padding:3px 0;border-bottom:1px solid #3a3226'>" + improvEsc(l) + "</div>").join('');
+  const loadBtn = document.getElementById('improvLoadAI');
+  if (loadBtn && !loadBtn.dataset.wired) { loadBtn.dataset.wired = '1'; loadBtn.addEventListener('click', () => { loadBrowserAI(); loadImgGen(); }); }
+  const send = document.getElementById('improvSend');
+  const input = document.getElementById('improvInput');
+  if (!send || !input || send.dataset.wired) return;
+  send.dataset.wired = '1';
+  const st = document.getElementById('improvStatus');
+  const doImprov = async () => {
+    const text = input.value.trim();
+    if (!text || storyImprov.busy) return;
+    input.value = '';
+    if (!webllm.ready && navigator.gpu) { if (st) st.textContent = 'AI 読み込み中…'; await loadBrowserAI(); }
+    if (!webllm.ready) { if (st) st.textContent = 'AI 起動が必要（WebGPU）'; return; }
+    storyImprov.busy = true;
+    const step = (typeof stepAt === 'function') ? stepAt(sceneOf(state.sceneId), state.beat) : {};
+    const who = step.who || '';
+    const ctx = { char: IMPROV_CHAR_NAME[state.char] || state.char, who: who, npcId: IMPROV_PERSONA_BY_NAME[who] || '', scene: state.sceneId, line: step.sayJa || '' };
+    storyImprov.lines.push('▶ ' + ctx.char + '：' + text);
+    if (st) st.textContent = '……その場が応じる';
+    render();
+    try {
+      const reply = await runBrowserStoryImprov(ctx, text);
+      storyImprov.lines.push(reply);
+      render();
+      // paint a background for the moment (English scene descriptor via sbSceneEn)
+      const bgp = (typeof sbSceneEn === 'function') ? sbSceneEn(reply + ' ' + text) : 'an ancient Chinese scene, banners';
+      genStoryBg(bgp).then(() => render());
+    } catch (e) { storyImprov.lines.push('（応答に失敗）'); render(); }
+    if (st) st.textContent = '';
+    storyImprov.busy = false;
+  };
+  send.addEventListener('click', doImprov);
+  input.addEventListener('keydown', (e) => { if (e.isComposing) return; if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doImprov(); } });
 }
 
 // render() rebuilds #stage, so the freshly-created #sbScene canvas is blank
