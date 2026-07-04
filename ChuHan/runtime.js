@@ -408,22 +408,22 @@ function wireAction() {
   b.addEventListener('click', openAction);
 }
 
-// ─── In-browser scene illustration (SD-Turbo via diffusers.js / WebGPU).
-// Optional, opt-in, cached, non-blocking. A 1-step distilled diffusion
-// model paints the current situation in an ink-wash style. No server,
-// no cost — same static/Steam story as the browser LLM. If WebGPU is
-// absent or anything throws, we just skip it: the shader/SVG/sim
-// visuals carry the scene regardless.
-//
-// TUNE ON A REAL WEBGPU BROWSER: the exact ONNX repo id and diffusers.js
-// run() params below are the two things most likely to need adjusting;
-// they're isolated as constants for that reason.
-// The previous repo (aislamov/sd-turbo-onnx) 404/401s on HuggingFace.
-// Use diffusers.js's documented demo ONNX model. NOTE: still best-effort
-// / unverified on a real WebGPU browser — image gen is an optional flourish.
-const IMG_MODEL = 'aislamov/stable-diffusion-2-1-base-onnx';
-const IMG_STEPS = 20;                         // SD 2.1 base is multi-step
-let imggen = { mod: null, pipe: null, ready: false, loading: false, busy: false };
+// ─── In-browser scene illustration: Stable Diffusion 2.1-base txt2img on
+// onnxruntime-web's WebGPU EP, straight from the locally-served /models.
+// Opt-in, cached, non-blocking. We drive the ONNX sessions ourselves
+// (CLIP tokenizer + Euler scheduler + classifier-free guidance + VAE) —
+// the old @aislamov/diffusers.js wrapper is unusable on current Chrome:
+// its bundled onnxruntime-web calls `new WebAssembly.Function(...)`, a
+// WASM type-reflection API Chrome no longer provides, so its WebGPU
+// backend can't init (verified via CDP on real Chrome + real GPU). The
+// modern ort-web build below has no such dependency and loads the exact
+// same model files. If WebGPU is absent or anything throws we just skip
+// it; the shader/SVG/sim visuals carry the scene regardless.
+const IMG_ORT_URL  = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.min.mjs';
+const IMG_ORT_WASM = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
+const IMG_BASE  = '/models/aislamov/stable-diffusion-2-1-base-onnx/';
+const IMG_STEPS = 12;                          // ~1.3s/step on WebGPU (2 unet passes)
+let imggen = { ort: null, enc: null, unet: null, vae: null, tok: null, ready: false, loading: false, busy: false };
 
 function imgStatus(msg) {
   const s = document.getElementById('imgStatus');
@@ -434,6 +434,70 @@ function imgStatus(msg) {
 // compiled by LeanJs. This is only the host-side null guard.
 function scenePrompt() {
   return state.world ? sbScenePrompt(state.world) : '';
+}
+
+// CLIP BPE tokenizer (vocab.json + merges.txt) → 77 int32 token ids.
+function imgMakeTokenizer(vocab, mergesTxt) {
+  const merges = mergesTxt.split('\n').slice(1).filter(l => l && !l.startsWith('#'));
+  const ranks = new Map(merges.map((m, i) => [m, i]));
+  const BOS = 49406, EOS = 49407, MAXLEN = 77;
+  const pat = /'s|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+/giu;
+  const getPairs = (w) => { const s = new Set(); for (let i = 0; i < w.length - 1; i++) s.add(w[i] + ' ' + w[i + 1]); return s; };
+  function bpe(token) {
+    let word = token.split('');
+    word[word.length - 1] = word[word.length - 1] + '</w>';
+    while (true) {
+      const pairs = getPairs(word);
+      let best = null, bestRank = Infinity;
+      for (const p of pairs) { const r = ranks.get(p); if (r !== undefined && r < bestRank) { bestRank = r; best = p; } }
+      if (best === null) break;
+      const [a, b] = best.split(' ');
+      const nw = []; let i = 0;
+      while (i < word.length) {
+        if (i < word.length - 1 && word[i] === a && word[i + 1] === b) { nw.push(a + b); i += 2; }
+        else { nw.push(word[i]); i += 1; }
+      }
+      word = nw;
+      if (word.length === 1) break;
+    }
+    return word;
+  }
+  return function encode(text) {
+    const ids = [BOS];
+    text = (text || '').toLowerCase().trim();
+    for (const m of text.matchAll(pat)) for (const piece of bpe(m[0])) { const id = vocab[piece]; if (id !== undefined) ids.push(id); }
+    ids.push(EOS);
+    const out = ids.slice(0, MAXLEN);
+    while (out.length < MAXLEN) out.push(EOS);
+    return out;
+  };
+}
+
+// EulerDiscrete schedule for scaled-linear betas (SD-2.1 base).
+let imgSigmasFull = null;
+function imgSigmaTable() {
+  if (imgSigmasFull) return imgSigmasFull;
+  const n = 1000, bS = 0.00085, bE = 0.012, out = [];
+  let a = 1;
+  for (let i = 0; i < n; i++) { const t = i / (n - 1); const beta = Math.pow(Math.sqrt(bS) + t * (Math.sqrt(bE) - Math.sqrt(bS)), 2); a *= (1 - beta); out.push(Math.sqrt((1 - a) / a)); }
+  imgSigmasFull = out; return out;
+}
+function imgSetTimesteps(steps) {
+  const full = imgSigmaTable(), n = full.length, sigmas = [], tsteps = [];
+  for (let i = 0; i < steps; i++) {
+    const t = (n - 1) * (1 - i / (steps - 1 || 1));
+    const lo = Math.floor(t), hi = Math.min(lo + 1, n - 1), frac = t - lo;
+    sigmas.push(full[lo] * (1 - frac) + full[hi] * frac);
+    tsteps.push(t);
+  }
+  sigmas.push(0);
+  return { sigmas, tsteps, initNoiseSigma: sigmas[0] };
+}
+// unet expects a discrete training timestep; map a sigma to nearest index.
+function imgSigmaToT(sigma) {
+  const full = imgSigmaTable(); let best = 0, bd = Infinity;
+  for (let i = 0; i < full.length; i++) { const d = Math.abs(full[i] - sigma); if (d < bd) { bd = d; best = i; } }
+  return best;
 }
 
 let imggenLoadPromise = null;   // shared so a 2nd genScene() awaits the same load
@@ -447,23 +511,28 @@ async function loadImgGen() {
   imgStatus('画家を読み込み中…（サーバの /models から。初回のみ）');
   imggenLoadPromise = (async () => {
   try {
-    if (!imggen.mod) imggen.mod = await import('https://esm.run/@aislamov/diffusers.js');
-    // Point diffusers.js at our locally-served model cache. It builds
-    // `${base}/${repo}/${path}` and tries that first, falling back to the
-    // HF CDN only for files we haven't mirrored. So the ~2.5GB SD model
-    // loads from localhost (fast) instead of the slow HF single-stream.
-    if (imggen.mod.setModelCacheDir) imggen.mod.setModelCacheDir(location.origin + '/models');
-    imggen.pipe = await imggen.mod.DiffusionPipeline.fromPretrained(IMG_MODEL, {
-      progressCallback: (p) => imgStatus('画家 読み込み: ' + (p && p.status ? p.status : '…'))
-    });
+    const base = location.origin + IMG_BASE;
+    const buf = async (u) => { const r = await fetch(base + u); if (!r.ok) throw new Error('fetch ' + r.status + ' ' + u); return r.arrayBuffer(); };
+    imgStatus('画家 読み込み: runtime');
+    imggen.ort = await import(IMG_ORT_URL);
+    imggen.ort.env.wasm.wasmPaths = IMG_ORT_WASM;
+    const opt = { executionProviders: ['webgpu'] };
+    imgStatus('画家 読み込み: tokenizer');
+    imggen.tok = imgMakeTokenizer(await (await fetch(base + 'tokenizer/vocab.json')).json(),
+                                  await (await fetch(base + 'tokenizer/merges.txt')).text());
+    imgStatus('画家 読み込み: text_encoder');
+    imggen.enc = await imggen.ort.InferenceSession.create(await buf('text_encoder/model.onnx'), opt);
+    imgStatus('画家 読み込み: unet（~1.75GB）');
+    imggen.unet = await imggen.ort.InferenceSession.create(await buf('unet/model.onnx'), opt);
+    imgStatus('画家 読み込み: vae');
+    const vaeData = new Uint8Array(await buf('vae_decoder/model.onnx_data'));  // external weights
+    imggen.vae = await imggen.ort.InferenceSession.create(await buf('vae_decoder/model.onnx'),
+      { executionProviders: ['webgpu'], externalData: [{ path: 'model.onnx_data', data: vaeData }] });
     imggen.ready = true;
     imgStatus('画家 起動済み');
   } catch (e) {
     const em = (e && e.message ? e.message : String(e));
-    const calm = /401|403|404|not found|status/i.test(em)
-      ? '画像生成モデルを読み込めませんでした（実験的機能・環境により未対応）。進行には影響しません。'
-      : '画像生成に失敗しました（' + em.slice(0, 60) + '）。進行には影響しません。';
-    imgStatus(calm);
+    imgStatus('画像生成の起動に失敗しました（' + em.slice(0, 70) + '）。進行には影響しません。');
   } finally {
     imggen.loading = false;
   }
@@ -472,30 +541,61 @@ async function loadImgGen() {
   return imggen.ready;
 }
 
+async function imgEmbed(text) {
+  const ids = imggen.tok(text);
+  const out = await imggen.enc.run({ input_ids: new imggen.ort.Tensor('int32', Int32Array.from(ids), [1, 77]) });
+  return out[imggen.enc.outputNames[0]];   // last_hidden_state [1,77,1024]
+}
+
 async function genScene() {
   if (imggen.busy) return;
   if (!imggen.ready) { const ok = await loadImgGen(); if (!ok) return; }
   imggen.busy = true;
   imgStatus('筆を執っている…');
   try {
+    const Tensor = imggen.ort.Tensor;
+    const H = 512, W = 512, LH = 64, LW = 64, C = 4, n = C * LH * LW, guidance = 7.5;
+    const condE = await imgEmbed(scenePrompt());
+    const uncondE = await imgEmbed('lowres, blurry, ugly, deformed, text, watermark');
+    const { sigmas, initNoiseSigma } = imgSetTimesteps(IMG_STEPS);
+    // init latents ~ N(0,1) * initNoiseSigma (deterministic LCG-Gaussian)
+    const lat = new Float32Array(n);
+    let seed = ((Date.now() & 0xffff) ^ 0x9e37) >>> 0;
+    const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; const u1 = (seed >>> 8) / 16777216; seed = (seed * 1664525 + 1013904223) >>> 0; const u2 = (seed >>> 8) / 16777216; return Math.sqrt(-2 * Math.log(u1 + 1e-9)) * Math.cos(6.283185 * u2); };
+    for (let i = 0; i < n; i++) lat[i] = rnd() * initNoiseSigma;
+    for (let s = 0; s < IMG_STEPS; s++) {
+      const sigma = sigmas[s], cIn = 1 / Math.sqrt(sigma * sigma + 1);
+      const scaled = new Float32Array(n); for (let i = 0; i < n; i++) scaled[i] = lat[i] * cIn;
+      const sample = new Tensor('float32', scaled, [1, C, LH, LW]);
+      const ts = new Tensor('float32', Float32Array.from([imgSigmaToT(sigma)]), [1]);
+      const rc = await imggen.unet.run({ sample, timestep: ts, encoder_hidden_states: condE });
+      const ru = await imggen.unet.run({ sample, timestep: ts, encoder_hidden_states: uncondE });
+      const nc = rc[imggen.unet.outputNames[0]].data, nu = ru[imggen.unet.outputNames[0]].data;
+      const dt = sigmas[s + 1] - sigma;
+      for (let i = 0; i < n; i++) {
+        const noise = nu[i] + guidance * (nc[i] - nu[i]);
+        const denoised = lat[i] - sigma * noise;            // x0 prediction
+        lat[i] = lat[i] + ((lat[i] - denoised) / sigma) * dt; // Euler step
+      }
+      imgStatus('描画 ' + (s + 1) + '/' + IMG_STEPS);
+    }
+    const dl = new Float32Array(n); for (let i = 0; i < n; i++) dl[i] = lat[i] / 0.18215;
+    const dec = await imggen.vae.run({ latent_sample: new Tensor('float32', dl, [1, C, LH, LW]) });
+    const px = dec[imggen.vae.outputNames[0]].data;         // [1,3,512,512] in [-1,1]
     const canvas = document.getElementById('sbScene');
-    const images = await imggen.pipe.run({
-      prompt: scenePrompt(),
-      numInferenceSteps: IMG_STEPS,
-      guidanceScale: 7.5,
-      progressCallback: (info) => { if (info && info.step != null) imgStatus('描画 ' + info.step + '/' + IMG_STEPS); }
-    });
-    const img = Array.isArray(images) ? images[0] : images;
-    // diffusers.js tensors expose toImageData(); fall back to any canvas the lib returns.
-    if (canvas && img && img.toImageData) {
-      const data = await img.toImageData();
-      canvas.width = data.width; canvas.height = data.height;
-      canvas.getContext('2d').putImageData(data, 0, 0);
+    if (canvas) {
+      const out = new Uint8ClampedArray(W * H * 4), plane = W * H;
+      for (let i = 0; i < plane; i++) {
+        out[i * 4] = (px[i] * 0.5 + 0.5) * 255;
+        out[i * 4 + 1] = (px[plane + i] * 0.5 + 0.5) * 255;
+        out[i * 4 + 2] = (px[2 * plane + i] * 0.5 + 0.5) * 255;
+        out[i * 4 + 3] = 255;
+      }
+      canvas.width = W; canvas.height = H;
+      canvas.getContext('2d').putImageData(new ImageData(out, W, H), 0, 0);
       canvas.style.display = 'block';
       imgStatus('（情景 更新）');
-    } else {
-      imgStatus('画像の取り出しに失敗（実機で run() の戻り値を要確認）');
-    }
+    } else imgStatus('（キャンバス未検出）');
   } catch (e) {
     imgStatus('描画失敗: ' + (e && e.message ? e.message : e));
   } finally {
