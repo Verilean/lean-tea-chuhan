@@ -1544,7 +1544,7 @@ def viewLlmChat(state) :=
     "<div class='chat-header'><span class='chat-npc-name' style='color:",
     l.npcColor, "'>", hesc(l.npcName), "</span>",
     " と話す ", button("icon", {tag: "llmEnd"}, "終わる ▶"),
-    "<button id='concludeChat' class='btn btn-primary' style='font-size:12px;margin-left:6px'>⚖ 決着をつける（★結末★）</button>",
+    " ", button("primary", {tag: "concludeChat"}, "⚖ 決着をつける（★結末★）"),
     "<span id='llmAiStatus' style='font-size:11px;color:#8a7d63;margin-left:8px'></span>",
     "<button id='llmLoadAI' class='btn btn-ghost' style='font-size:11px;margin-left:6px'>🧠 ブラウザAI起動</button>",
     "</div>",
