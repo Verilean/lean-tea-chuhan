@@ -954,6 +954,51 @@ async function runBrowserGM(action, world) {
            action: j.action || null };
 }
 
+// In-browser (WebLLM) NPC chat — same role as /api/ask, no server needed.
+async function runBrowserChat(npcName, history, message) {
+  const sys = 'あなたは楚漢戦争（紀元前209〜202年の中国）の登場人物「' + (npcName || '登場人物') + '」です。'
+    + 'その人物の性格・立場・話し方で、日本語で簡潔に（2〜4文）応答してください。'
+    + '時代や人物像を外さず、メタ発言や現代語の解説はしないこと。';
+  const msgs = [{ role: 'system', content: sys }];
+  for (const m of (history || [])) msgs.push({ role: m.role === 'user' ? 'user' : 'assistant', content: m.text });
+  msgs.push({ role: 'user', content: message });
+  const r = await webllm.engine.chat.completions.create({ messages: msgs, temperature: 0.8, max_tokens: 220 });
+  return (r.choices[0].message.content || '').trim();
+}
+
+// In-browser (WebLLM) TRPG judgement — same shape as /api/resolve.
+async function runBrowserResolve(action) {
+  const sys = 'あなたは紀元前209〜202年を舞台にしたTRPGのゲームマスターです。'
+    + 'プレイヤーが書いた行動を、状況・人物の性格・史実の重みに照らして3段階で判定します。'
+    + 'good=うまくいく / ok=微妙な反応 / bad=失敗・致命的。'
+    + '\n返答は必ず次のJSON1行のみ（前後に何も付けない）: {"outcome":"good|ok|bad","reasoning":"理由（50-150字）"}';
+  const r = await webllm.engine.chat.completions.create({
+    messages: [{ role: 'system', content: sys }, { role: 'user', content: '行動: ' + action }],
+    temperature: 0.7, max_tokens: 200
+  });
+  const j = JSON.parse(stripFence(r.choices[0].message.content));   // throws → caller falls back
+  return { outcome: (j.outcome === 'good' || j.outcome === 'bad') ? j.outcome : 'ok', reasoning: j.reasoning || '' };
+}
+
+// Shared: wire the "🧠 ブラウザAI起動" button + status on the story
+// chat / resolve screens, so the in-browser model can be loaded there
+// too (not only from the sandbox).
+function wireLlmLoadButton() {
+  const st = document.getElementById('llmAiStatus');
+  if (st) st.textContent = webllm.ready ? 'ブラウザAI 起動済み' : (webllm.loading ? '起動中…' : '（サーバ未接続ならこれを起動）');
+  const b = document.getElementById('llmLoadAI');
+  if (!b) return;
+  if (webllm.ready) { b.style.display = 'none'; return; }
+  if (b.dataset.wired) return;
+  b.dataset.wired = '1';
+  b.addEventListener('click', async () => {
+    if (st) st.textContent = '起動中…（初回 ~1GB・WebGPU）';
+    await loadBrowserAI();
+    if (st) st.textContent = webllm.ready ? 'ブラウザAI 起動済み' : '起動失敗（WebGPU 非対応?）';
+    if (webllm.ready) b.style.display = 'none';
+  });
+}
+
 // ─── Sandbox game master wiring. Prefers the in-browser AI when it's
 // loaded, then the server /api/gm, then the local event tables. ─────
 function wireGmHandlers() {
@@ -1031,6 +1076,7 @@ function wireChatHandlers() {
   const input = document.getElementById('chatInput');
   const history = document.getElementById('chatHistory');
   if (history) history.scrollTop = history.scrollHeight;
+  wireLlmLoadButton();
   if (!send || !input) return;
   if (send.dataset.wired) return;
   send.dataset.wired = '1';
@@ -1038,38 +1084,41 @@ function wireChatHandlers() {
     const text = input.value.trim();
     if (!text || state.llm.pending) return;
     input.value = '';
+    const npcName = state.llm.npcName;
+    const hist = state.llm.history.slice();   // before pushing the user msg
     state = update({tag: 'llmSendUser', text: text}, state);
     persist(state);
     render();
-    try {
-      const res = await fetch('/api/ask', {
-        method: 'POST',
-        headers: {'content-type': 'application/json'},
-        body: JSON.stringify({
-          npcId: state.llm.npcId,
-          sceneId: state.sceneId,
-          history: state.llm.history.slice(0, -1),  // exclude the just-pushed user msg
-          message: text
-        })
-      });
-      const j = await res.json();
-      if (j.error) {
-        state = update({tag: 'llmError', text: j.error}, state);
-      } else {
-        state = update({tag: 'llmReply', text: j.reply || '(空の応答)'}, state);
-      }
-    } catch (e) {
-      state = update({tag: 'llmError', text: 'network: ' + e.message}, state);
+    let done = false;
+    // 1) in-browser WebLLM if loaded — no server LLM needed
+    if (webllm.ready) {
+      try {
+        const reply = await runBrowserChat(npcName, hist, text);
+        state = update({tag: 'llmReply', text: reply || '(空の応答)'}, state);
+        done = true;
+      } catch (e) { /* fall through to server */ }
     }
+    // 2) server /api/ask
+    if (!done) {
+      try {
+        const res = await fetch('/api/ask', {
+          method: 'POST', headers: {'content-type': 'application/json'},
+          body: JSON.stringify({ npcId: state.llm.npcId, sceneId: state.sceneId, history: hist, message: text })
+        });
+        const j = await res.json();
+        if (j.error) state = update({tag: 'llmError', text: j.error}, state);
+        else state = update({tag: 'llmReply', text: j.reply || '(空の応答)'}, state);
+        done = true;
+      } catch (e) { /* fall through */ }
+    }
+    if (!done) state = update({tag: 'llmError', text: '応答を得られません。「🧠 ブラウザAI起動」を押すか、サーバに LLM を接続してください。'}, state);
     persist(state);
     render();
   };
   send.addEventListener('click', doSend);
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      doSend();
-    }
+    if (e.isComposing) return;
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doSend(); }
   });
   input.focus();
 }
@@ -1082,6 +1131,7 @@ function wireChatHandlers() {
 function wireResolveHandlers() {
   const send = document.getElementById('resolveSend');
   const input = document.getElementById('resolveInput');
+  wireLlmLoadButton();
   if (!send || !input) return;
   if (send.dataset.wired) return;
   send.dataset.wired = '1';
@@ -1092,38 +1142,36 @@ function wireResolveHandlers() {
     state = update({tag: 'resolveSubmit', text: text}, state);
     persist(state);
     render();
-    try {
-      const res = await fetch('/api/resolve', {
-        method: 'POST',
-        headers: {'content-type': 'application/json'},
-        body: JSON.stringify({
-          kind: state.resolve.kind,
-          sceneId: state.sceneId,
-          char: state.char,
-          action: text
-        })
-      });
-      const j = await res.json();
-      if (j.error) {
-        state = update({tag: 'resolveError', text: j.error}, state);
-      } else {
-        state = update({tag: 'resolveResult',
-                        outcome: j.outcome || 'ok',
-                        reasoning: j.reasoning || '(no reasoning)'},
-                       state);
-      }
-    } catch (e) {
-      state = update({tag: 'resolveError', text: 'network: ' + e.message}, state);
+    let done = false;
+    // 1) in-browser WebLLM if loaded
+    if (webllm.ready) {
+      try {
+        const v = await runBrowserResolve(text);
+        state = update({tag: 'resolveResult', outcome: v.outcome, reasoning: v.reasoning || '(no reasoning)'}, state);
+        done = true;
+      } catch (e) { /* fall through to server */ }
     }
+    // 2) server /api/resolve
+    if (!done) {
+      try {
+        const res = await fetch('/api/resolve', {
+          method: 'POST', headers: {'content-type': 'application/json'},
+          body: JSON.stringify({ kind: state.resolve.kind, sceneId: state.sceneId, char: state.char, action: text })
+        });
+        const j = await res.json();
+        if (j.error) state = update({tag: 'resolveError', text: j.error}, state);
+        else state = update({tag: 'resolveResult', outcome: j.outcome || 'ok', reasoning: j.reasoning || '(no reasoning)'}, state);
+        done = true;
+      } catch (e) { /* fall through */ }
+    }
+    if (!done) state = update({tag: 'resolveError', text: '判定を得られません。「🧠 ブラウザAI起動」を押すか、サーバに LLM を接続してください。'}, state);
     persist(state);
     render();
   };
   send.addEventListener('click', doSend);
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      doSend();
-    }
+    if (e.isComposing) return;
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doSend(); }
   });
   input.focus();
 }

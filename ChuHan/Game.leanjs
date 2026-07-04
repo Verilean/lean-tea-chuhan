@@ -1163,11 +1163,14 @@ def charLoop(state, cs, i, acc) :=
 
 def viewSelect(state) :=
   let title := if state.lang == "en" then "Choose your fate" else "主人公を選べ";
+  let back := if state.lang == "en" then "← Title" else "← タイトルへ";
   sjoin([
     "<div class='select-bg'>", renderHud(state),
     "<h2>", hesc(title), "</h2><div class='roster'>",
     charLoop(state, chars, 0, ""),
-    "</div></div>"
+    "</div>",
+    "<div style='text-align:center;margin-top:16px'>", button("ghost", {tag: "toTitle"}, back), "</div>",
+    "</div>"
   ])
 
 -- Scene (dialogue) render
@@ -1526,12 +1529,14 @@ def viewLlmChat(state) :=
     "<div class='chat-header'><span class='chat-npc-name' style='color:",
     l.npcColor, "'>", hesc(l.npcName), "</span>",
     " と話す ", button("icon", {tag: "llmEnd"}, "終わる ▶"),
+    "<span id='llmAiStatus' style='font-size:11px;color:#8a7d63;margin-left:8px'></span>",
+    "<button id='llmLoadAI' class='btn btn-ghost' style='font-size:11px;margin-left:6px'>🧠 ブラウザAI起動</button>",
     "</div>",
     "<div class='chat-history' id='chatHistory'>",
     bubbles, pendingHtml, errorHtml,
     "</div>",
     "<div class='chat-input-row'>",
-    "<textarea id='chatInput' class='chat-input' rows='2' placeholder='ここに話しかける言葉を入力 (Enter で送信)' ",
+    "<textarea id='chatInput' class='chat-input' rows='2' placeholder='話しかける言葉を入力 (⌘/Ctrl+Enter で送信)' ",
     if l.pending then "disabled" else "",
     "></textarea>",
     "<button class='chat-send' id='chatSend' ", if l.pending then "disabled" else "",
@@ -1573,12 +1578,14 @@ def viewAiResolve(state) :=
   let inputBlock := if r.resultOutcome != "" then ""
                     else sjoin([
                       "<div class='resolve-input-row'>",
-                      "<textarea id='resolveInput' class='resolve-input' rows='3' placeholder='ここに行動を書く (Enter で送信)' ",
+                      "<textarea id='resolveInput' class='resolve-input' rows='3' placeholder='ここに行動を書く (⌘/Ctrl+Enter で送信)' ",
                       if r.pending then "disabled" else "",
                       "></textarea>",
                       "<button class='btn btn-primary' id='resolveSend' ",
                       if r.pending then "disabled" else "",
-                      ">送信</button></div>"
+                      ">送信</button></div>",
+                      "<div style='margin-top:6px'><span id='llmAiStatus' style='font-size:11px;color:#8a7d63'></span>",
+                      "<button id='llmLoadAI' class='btn btn-ghost' style='font-size:11px;margin-left:6px'>🧠 ブラウザAI起動</button></div>"
                     ]);
   let body := sjoin([
     "<div class='resolve-situation'>", hesc(situation), "</div>",
