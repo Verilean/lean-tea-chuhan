@@ -1,6 +1,8 @@
 import LeanTea
+import LeanTea.Persist.Sqlite
 import LeanJs.Parser
 import LeanJs.Codegen
+import LeanJs.Includes
 import ChuHan.Game
 
 /-! # chuhan_serve — 楚漢恋歌 SPA + LLM TRPG backend
@@ -26,13 +28,19 @@ open Lean (Json)
 namespace ChuHanServe
 
 def compileGame : IO (String × Bool) := do
-  let src ← ChuHan.loadSource
+  let (src, path) ← ChuHan.loadSourceAt
   match Parser.parseProgramString src with
   | .error e => return (s!"throw new Error({String.quote e});", true)
-  | .ok p    =>
-    match Codegen.compileChecked p with
-    | .error e => return (s!"throw new Error({String.quote s!"LeanJs check: {e}"});", true)
-    | .ok js   => return (js, false)
+  | .ok p0   =>
+    try
+      -- Splice `include "…"` files (Story.leanjs / Sandbox.leanjs) before
+      -- checking + codegen, so the game can live across several files.
+      let p ← LeanJs.Includes.resolve path p0
+      match Codegen.compileChecked p with
+      | .error e => return (s!"throw new Error({String.quote s!"LeanJs check: {e}"});", true)
+      | .ok js   => return (js, false)
+    catch e =>
+      return (s!"throw new Error({String.quote s!"include: {e}"});", true)
 
 /-! ## Asset audit
 
@@ -133,6 +141,101 @@ private def genericRoles : List String := [
   "漂母", "民衆", "兵士", "役人", "商人", "童", "侍女",
   ""
 ]
+
+/-! ## Button-tag audit
+
+Every interactive view button dispatches a `{tag: "X"}` message. If no
+handler exists — an `update` match arm `| "X" =>`, or a `msg.tag === 'X'`
+/ `/^X…/.exec(msg.tag)` interception in runtime.js — clicking it silently
+does nothing (the recurring "dead button" bug). Catch it at boot, same
+spirit as the asset audit: no button ships without a handler. -/
+
+private def tagChar (c : Char) : Bool := c.isAlphanum || c == '_'
+
+/-- First quoted token (single or double quote) after skipping leading
+whitespace / `:` / `=`. `none` if the next non-space char isn't a quote. -/
+private def firstQuotedTok (s : String) : Option String :=
+  let cs := s.toList.dropWhile (fun c => c == ' ' || c == '\t' || c == ':' || c == '=')
+  match cs with
+  | '"'  :: rest => some (rest.takeWhile (· != '"')).asString
+  | '\'' :: rest => some (rest.takeWhile (· != '\'')).asString
+  | _ => none
+
+/-- First quoted token after each occurrence of `marker`. -/
+private def collectQuotedAfter (src marker : String) : List String := Id.run do
+  let mut out : Std.HashSet String := {}
+  for part in (src.splitOn marker).tail! do
+    match firstQuotedTok part with
+    | some t => if !t.isEmpty then out := out.insert t
+    | none => pure ()
+  return out.toList
+
+/-- Alnum(+_) prefix right after each `/^` — a runtime.js interception
+regex like `/^saveSlot([123])$/` → the prefix `saveSlot`. -/
+private def collectRegexPrefixes (src : String) : List String := Id.run do
+  let mut out : Array String := #[]
+  for part in (src.splitOn "/^").tail! do
+    let p := (part.toList.takeWhile tagChar).asString
+    if !p.isEmpty then out := out.push p
+  return out.toList
+
+/-- The substring after the first `marker`, up to (excluding) `stop`. -/
+private def firstAfter (s marker : String) (stop : Char) : Option String :=
+  match (s.splitOn marker).tail! with
+  | part :: _ => some (part.toList.takeWhile (· != stop)).asString
+  | [] => none
+
+/-- Raw `<button …>` literals in the source (as opposed to the `button()`
+helper, which emits its own `data-msg`). Each raw button is only alive if
+it either carries `data-msg` (→ the tag audit covers it) or has an
+`id='X'` that runtime.js actually wires (`getElementById`/`#X`). A raw
+button with neither is dead on arrival — exactly the `concludeChat` bug.
+Returns the ids (or a snippet) of the dead ones. -/
+private def deadRawButtons (gameSrc runtimeSrc : String) : List String := Id.run do
+  let mut dead : Array String := #[]
+  for part in (gameSrc.splitOn "<button").tail! do
+    let chunk := (part.toList.takeWhile (· != '>')).asString
+    if (chunk.splitOn "data-msg").length > 1 then continue  -- helper/data-msg button
+    let id := (firstAfter chunk "id='" '\'').orElse (fun _ => firstAfter chunk "id=\"" '"')
+    match id with
+    | none => dead := dead.push "(no id, no data-msg)"
+    | some x =>
+      -- Must be an actual id lookup — NOT just the string appearing somewhere
+      -- (e.g. a `msg.tag === 'x'` interception, which needs data-msg, not id).
+      let wired := (runtimeSrc.splitOn s!"getElementById('{x}')").length > 1
+                || (runtimeSrc.splitOn s!"getElementById(\"{x}\")").length > 1
+                || (runtimeSrc.splitOn s!"#{x}").length > 1
+      if !wired then dead := dead.push x
+  return dead.toList
+
+/-- Warn (loudly) about any view button that can't respond to a click:
+either a `{tag:"X"}` with no handler, or a raw `<button>` that is neither
+`data-msg`-dispatched nor id-wired in runtime.js. `gameSrc` = the game
+`.leanjs` sources, `runtimeSrc` = runtime.js. -/
+def auditButtons (gameSrc runtimeSrc : String) (manifestPath : String) : IO Unit := do
+  let dispatched := collectQuotedAfter gameSrc "{tag:"      -- view buttons
+  let armTags    := collectQuotedAfter gameSrc "| "         -- update `| "X" =>`
+  let msgTags    := collectQuotedAfter runtimeSrc "msg.tag =" -- `msg.tag === 'X'`
+  let prefixes   := collectRegexPrefixes runtimeSrc          -- `/^saveSlot…/`
+  let mut handled : Std.HashSet String := {}
+  for t in armTags ++ msgTags do handled := handled.insert t
+  let mut lines : Array String := #[]
+  for t in dispatched do
+    if !(handled.contains t || prefixes.any (fun p => t.startsWith p)) then
+      lines := lines.push s!"DEAD_BUTTON: {t}   (no update arm / msg.tag interception)"
+  for x in deadRawButtons gameSrc runtimeSrc do
+    lines := lines.push s!"DEAD_RAW_BUTTON: {x}   (raw <button> with no data-msg and no wired id)"
+  if lines.isEmpty then
+    IO.eprintln s!"chuhan: button audit OK — {dispatched.length} tags + raw buttons, all live"
+  else
+    IO.eprintln "chuhan: ⚠ DEAD BUTTONS (clicking these does nothing):"
+    for l in lines do IO.eprintln s!"  {l}"
+    IO.FS.writeFile manifestPath
+      ("# A button that can't respond to a click:\n\
+        #   DEAD_BUTTON     — {tag:\"X\"} with no update arm / msg.tag interception\n\
+        #   DEAD_RAW_BUTTON — raw <button> with no data-msg AND no id wired in runtime.js\n\
+        # Fix: use the button({tag}) helper + a handler, or wire the id.\n"
+        ++ String.intercalate "\n" lines.toList ++ "\n")
 
 def auditAssets (gameSrc : String) (pageSrc : String) (assetDir : String)
     (manifestPath : String) : IO Unit := do
@@ -440,9 +543,17 @@ private def gmSystemPrompt : String :=
 \n\n地域ID: guanzhong(關中) xianyang(咸陽) hanzhong(漢中) bashu(巴蜀) \
 pengcheng(彭城) wei(魏) zhao(趙) qi(齊)\
 \n勢力ID: han(漢) chu(楚) qin(秦) lords(諸侯)\
+\n\n功臣(部将): 韓信 彭越 英布 蕭何 張良。忠誠・野心・兵力を持ち、勝たせると脅威になる。\
+\n遠征先ID: xiongnu(匈奴) chaoxian(朝鮮) nanyue(南越) xiyu(西域) wa(倭/日本) yuezhi(大月氏) shendu(身毒) anxi(安息) daqin(大秦/エジプト)\
 \n\n返答は必ず次の JSON 1 行のみ。前後にコードブロックも文章も付けないこと:\
-\n{\"narration\":\"結果の描写(日本語 60-160字)\",\"deltas\":[{\"region\":\"地域ID\",\"dCtrl\":整数(-25〜25),\"owner\":\"勢力ID(領有が変わる時だけ)\"}]}\
-\n\ndCtrl は支配率の増減。owner は領有勢力が変わる時だけ入れる。deltas は 0〜3 個。"
+\n{\"narration\":\"結果の描写(日本語 60-160字)\",\"deltas\":[{\"region\":\"地域ID\",\"dCtrl\":整数(-25〜25),\"owner\":\"勢力ID(領有が変わる時だけ)\"}],\"action\":null}\
+\n\ndCtrl は支配率の増減。owner は領有勢力が変わる時だけ入れる。deltas は 0〜3 個。\
+\n\naction は任意。プレイヤーの行動がシステムを動かす時だけ、次のいずれかを入れる(普段は null):\
+\n・遠征を起こす: {\"type\":\"expedition\",\"target\":\"遠征先ID\"}(兵站と距離で成否が決まる。無謀なら破滅も)\
+\n・功臣を反乱させる: {\"type\":\"rebellion\",\"who\":\"功臣名\"}(冷遇や粛清の報い等。会戦で決する)\
+\n・忠誠を動かす: {\"type\":\"loyalty\",\"who\":\"功臣名\",\"d\":整数(-30〜30)}\
+\n・兵糧を動かす: {\"type\":\"supply\",\"d\":整数(-40〜40)}\
+\n行動が単なる会話や小さな采配なら action は null のまま、deltas だけで表す。"
 
 private def handleGm (cfg : LeanTea.Llm.Openai.Config) (req : Request) : IO Response := do
   match Json.parse (String.fromUTF8! req.body) with
@@ -471,9 +582,13 @@ private def handleGm (cfg : LeanTea.Llm.Openai.Config) (req : Request) : IO Resp
       | .ok j2 =>
         let narration := jstrField j2 "narration"
         let deltas := (j2.getObjVal? "deltas").toOption.bind (·.getArr?.toOption) |>.getD #[]
+        -- Pass through the optional structured action (expedition / rebellion
+        -- / loyalty / supply) so the client can drive the game systems.
+        let action := (j2.getObjVal? "action").toOption.getD Json.null
         let body := Json.mkObj [
           ("narration", Json.str (if narration.isEmpty then raw else narration)),
-          ("deltas", Json.arr deltas)
+          ("deltas", Json.arr deltas),
+          ("action", action)
         ]
         return Response.text 200 body.compress
       | .error _ =>
@@ -485,6 +600,171 @@ private def handleGm (cfg : LeanTea.Llm.Openai.Config) (req : Request) : IO Resp
     catch e =>
       let body := Json.mkObj [("error", Json.str s!"llm: {e}")]
       return Response.text 500 body.compress
+
+/-! ## Save slots — server-side SQLite persistence
+
+Named save slots live in a SQLite DB keyed by a client-generated
+"save code" (`save_key`), so a player can restore their slots on
+another device by entering the same code. Autosave stays client-side
+(localStorage); only explicit slots hit the server.
+
+SQLite is vendored into the binary (no external libsqlite3), so this
+works anywhere the server runs. The DB file is `$CHUHAN_DB` (default
+`chuhan_saves.db` in the cwd); on a host with an ephemeral disk (e.g.
+Render without a mounted volume) point it at a persistent path. -/
+
+private def saveDbPath : IO String := do
+  return (← IO.getEnv "CHUHAN_DB").getD "chuhan_saves.db"
+
+/-- Open the save DB with a busy timeout so brief write-lock contention
+    (concurrent saves) retries instead of erroring. -/
+private def openSaveDb : IO LeanTea.Sqlite.Db := do
+  let db ← LeanTea.Sqlite.open' (← saveDbPath)
+  LeanTea.Sqlite.exec db "PRAGMA busy_timeout=3000;"
+  return db
+
+/-- Create the tables if missing. Run once at boot. -/
+private def initSaveDb : IO Unit := do
+  let db ← openSaveDb
+  LeanTea.Sqlite.exec db
+    "CREATE TABLE IF NOT EXISTS saves (\
+       save_key   TEXT NOT NULL, \
+       slot       TEXT NOT NULL, \
+       label      TEXT NOT NULL DEFAULT '', \
+       state      TEXT NOT NULL, \
+       updated_at INTEGER NOT NULL, \
+       PRIMARY KEY (save_key, slot));"
+  -- Leaderboard: one row per finished sandbox run.
+  LeanTea.Sqlite.exec db
+    "CREATE TABLE IF NOT EXISTS scores (\
+       id         INTEGER PRIMARY KEY AUTOINCREMENT, \
+       save_key   TEXT NOT NULL DEFAULT '', \
+       name       TEXT NOT NULL DEFAULT '', \
+       anchor     TEXT NOT NULL DEFAULT '', \
+       outcome    TEXT NOT NULL DEFAULT '', \
+       regions    INTEGER NOT NULL DEFAULT 0, \
+       year       INTEGER NOT NULL DEFAULT 0, \
+       score      INTEGER NOT NULL DEFAULT 0, \
+       created_at INTEGER NOT NULL);"
+  LeanTea.Sqlite.close db
+
+/-- Parse `k=v&k2=v2` (query string, no `?`). Save codes and slot ids
+    are alnum, so no URL-decoding is needed. -/
+private def queryParam (q name : String) : Option String :=
+  (q.splitOn "&").findSome? fun kv =>
+    match kv.splitOn "=" with
+    | [k, v] => if k == name then some v else none
+    | _      => none
+
+/-- A save code / slot id must be a short alnum(+`-_`) token. Params are
+    bound (no injection risk); this just rejects junk early. -/
+private def validId (s : String) : Bool :=
+  0 < s.length && s.length ≤ 64 && s.all fun c => c.isAlphanum || c == '-' || c == '_'
+
+/-- `POST /api/save` — upsert `{key, slot, label, state}`. -/
+private def handleSave (req : Request) : IO Response := do
+  match Json.parse (String.fromUTF8! req.body) with
+  | .error e => return Response.json 400 (Json.mkObj [("error", Json.str s!"bad json: {e}")])
+  | .ok j =>
+    let key := jstrField j "key"
+    let slot := jstrField j "slot"
+    let label := jstrField j "label"
+    if !validId key || !validId slot then
+      return Response.json 400 (Json.mkObj [("error", Json.str "bad key/slot")])
+    match (j.getObjVal? "state").toOption with
+    | none => return Response.json 400 (Json.mkObj [("error", Json.str "missing state")])
+    | some stateJson =>
+      let db ← openSaveDb
+      let _ ← LeanTea.Sqlite.execp db
+        "INSERT INTO saves (save_key, slot, label, state, updated_at) \
+         VALUES (?, ?, ?, ?, CAST(strftime('%s','now') AS INTEGER)) \
+         ON CONFLICT(save_key, slot) DO UPDATE SET \
+           label=excluded.label, state=excluded.state, updated_at=excluded.updated_at;"
+        #[key, slot, label, stateJson.compress]
+      LeanTea.Sqlite.close db
+      return Response.json 200 (Json.mkObj [("ok", Json.bool true)])
+
+/-- `GET /api/load?key=&slot=` — one slot's state. -/
+private def handleLoad (req : Request) : IO Response := do
+  let key := (queryParam req.query "key").getD ""
+  let slot := (queryParam req.query "slot").getD ""
+  if !validId key || !validId slot then
+    return Response.json 400 (Json.mkObj [("error", Json.str "bad key/slot")])
+  let db ← openSaveDb
+  let rows ← LeanTea.Sqlite.query db
+    "SELECT state, label, updated_at FROM saves WHERE save_key=? AND slot=?;"
+    #[key, slot]
+  LeanTea.Sqlite.close db
+  match rows[0]? with
+  | none => return Response.json 404 (Json.mkObj [("error", Json.str "no such slot")])
+  | some row =>
+    match Json.parse (row[0]!) with
+    | .ok st => return Response.json 200 (Json.mkObj [
+        ("state", st), ("label", Json.str (row[1]!)), ("updated_at", Json.str (row[2]!))])
+    | .error _ => return Response.json 500 (Json.mkObj [("error", Json.str "corrupt save")])
+
+/-- `GET /api/slots?key=` — metadata for a code's slots (for the menu). -/
+private def handleSlots (req : Request) : IO Response := do
+  let key := (queryParam req.query "key").getD ""
+  if !validId key then
+    return Response.json 400 (Json.mkObj [("error", Json.str "bad key")])
+  let db ← openSaveDb
+  let rows ← LeanTea.Sqlite.query db
+    "SELECT slot, label, updated_at FROM saves WHERE save_key=? ORDER BY slot;"
+    #[key]
+  LeanTea.Sqlite.close db
+  let items := rows.map fun row =>
+    Json.mkObj [("slot", Json.str (row[0]!)), ("label", Json.str (row[1]!)),
+                ("updated_at", Json.str (row[2]!))]
+  return Response.json 200 (Json.mkObj [("slots", Json.arr items)])
+
+/-- A non-negative integer field (regions / year / score come as JSON
+    numbers; bound into SQL as their text form). -/
+private def jnatField (j : Json) (k : String) : Nat :=
+  ((j.getObjVal? k).toOption.bind (·.getNat?.toOption)).getD 0
+
+/-- `POST /api/score` — record one finished sandbox run for the board. -/
+private def handleScore (req : Request) : IO Response := do
+  match Json.parse (String.fromUTF8! req.body) with
+  | .error e => return Response.json 400 (Json.mkObj [("error", Json.str s!"bad json: {e}")])
+  | .ok j =>
+    let key := jstrField j "key"
+    let name := ((jstrField j "name").take 24).toString
+    let anchor := ((jstrField j "anchor").take 24).toString
+    let outcome := ((jstrField j "outcome").take 16).toString
+    let regions := jnatField j "regions"
+    let year := jnatField j "year"
+    let score := jnatField j "score"
+    let db ← openSaveDb
+    let _ ← LeanTea.Sqlite.execp db
+      "INSERT INTO scores (save_key, name, anchor, outcome, regions, year, score, created_at) \
+       VALUES (?, ?, ?, ?, ?, ?, ?, CAST(strftime('%s','now') AS INTEGER));"
+      #[key, name, anchor, outcome, toString regions, toString year, toString score]
+    LeanTea.Sqlite.close db
+    return Response.json 200 (Json.mkObj [("ok", Json.bool true)])
+
+/-- `GET /api/leaderboard?limit=&anchor=` — top runs by score. -/
+private def handleLeaderboard (req : Request) : IO Response := do
+  let limit := min (((queryParam req.query "limit").bind (·.toNat?)).getD 20) 100
+  let anchor := (queryParam req.query "anchor").getD ""
+  let db ← openSaveDb
+  let rows ← if anchor.isEmpty then
+      LeanTea.Sqlite.query db
+        "SELECT name, anchor, outcome, regions, year, score, created_at \
+         FROM scores ORDER BY score DESC, created_at DESC LIMIT ?;"
+        #[toString limit]
+    else
+      LeanTea.Sqlite.query db
+        "SELECT name, anchor, outcome, regions, year, score, created_at \
+         FROM scores WHERE anchor=? ORDER BY score DESC, created_at DESC LIMIT ?;"
+        #[anchor, toString limit]
+  LeanTea.Sqlite.close db
+  let items := rows.map fun r =>
+    Json.mkObj [("name", Json.str (r[0]!)), ("anchor", Json.str (r[1]!)),
+                ("outcome", Json.str (r[2]!)), ("regions", Json.str (r[3]!)),
+                ("year", Json.str (r[4]!)), ("score", Json.str (r[5]!)),
+                ("created_at", Json.str (r[6]!))]
+  return Response.json 200 (Json.mkObj [("scores", Json.arr items)])
 
 /-! ## Handler -/
 
@@ -506,16 +786,58 @@ def handler (cfg : LeanTea.Llm.Openai.Config)
   | "/game.js", _ =>
     let (gameJs, _) ← gameProv
     return Response.text 200 gameJs
+  | "/runtime.js", _ =>
+    -- Host runtime, extracted from page.html's inline script. Read fresh
+    -- per request (no boot cache) so edits show on reload without a
+    -- server restart. Classic script sharing scope with the game bundle.
+    let base ← chuhanDir
+    let full := base ++ "/runtime.js"
+    if ← System.FilePath.pathExists full then
+      let bytes ← IO.FS.readBinFile full
+      return {
+        status := 200,
+        headers := #[("content-type", "text/javascript; charset=utf-8"),
+                     ("cache-control", "no-cache")],
+        body := bytes
+      }
+    else return Response.notFound
   | "/api/ask", "POST" => handleAsk cfg req
   | "/api/resolve", "POST" => handleResolve cfg req
   | "/api/gm", "POST" => handleGm cfg req
+  | "/api/save", "POST" => handleSave req
+  | "/api/load", "GET"  => handleLoad req
+  | "/api/slots", "GET" => handleSlots req
+  | "/api/score", "POST" => handleScore req
+  | "/api/leaderboard", "GET" => handleLeaderboard req
   | "/favicon.ico", _ =>
     return { status := 204, headers := #[], body := .empty }
   | path, _ =>
+    /- Serve locally-cached ML model files (diffusers.js SD, etc.) from
+       ChuHan/models/. diffusers.js's setModelCacheDir points here, so the
+       browser loads the ~2.5GB model from localhost (fast) instead of the
+       HF CDN (slow), falling back to HF only for missing files. Subdirs
+       allowed; `..` blocked. -/
+    if path.startsWith "/models/" then
+      let rel := (path.drop "/models/".length).toString
+      if (rel.splitOn "..").length > 1 then return Response.notFound
+      else
+        let base ← chuhanDir
+        let full := base ++ "/models/" ++ rel
+        if ← System.FilePath.pathExists full then
+          let bytes ← IO.FS.readBinFile full
+          let mime := if rel.endsWith ".json" then "application/json"
+                      else if rel.endsWith ".txt" then "text/plain; charset=utf-8"
+                      else "application/octet-stream"
+          return {
+            status := 200,
+            headers := #[("content-type", mime), ("cache-control", "max-age=604800")],
+            body := bytes
+          }
+        else return Response.notFound
     /- Serve PNG / WEBP image assets from examples/ChuHan/assets/.
        Only allow alnum + underscore + dot + hyphen + slash in the
        URL path to avoid directory traversal. -/
-    if path.startsWith "/assets/" then
+    else if path.startsWith "/assets/" then
       let rel := (path.drop "/assets/".length).toString
       let bad := rel.contains '.' && (rel.splitOn "..").length > 1
       if bad || rel.contains '/' then return Response.notFound
@@ -579,11 +901,27 @@ def serveMain (args : List String) : IO Unit := do
   let modeNote := if a.dev then "  [DEV: hot reload]" else ""
   IO.println s!"chuhan server: http://{a.host}:{a.port}/{modeNote}"
   IO.println s!"  LLM backend: {baseUrl}"
-  /- Asset audit: anything missing is loud (stderr + manifest file). -/
-  let gameSrc ← ChuHan.loadSource
+  /- Asset audit: anything missing is loud (stderr + manifest file).
+     Read every game source file (the game is split across Game/Story/
+     Sandbox .leanjs) so portrait refs in any of them are audited. -/
+  let mut gameSrc := ""
+  for f in ["Game.leanjs", "Story.leanjs", "Sandbox.leanjs"] do
+    let fp := base ++ "/" ++ f
+    if ← System.FilePath.pathExists fp then
+      gameSrc := gameSrc ++ "\n" ++ (← IO.FS.readFile fp)
   let pageSrc ← IO.FS.readFile (base ++ "/page.html")
-  auditAssets gameSrc pageSrc (base ++ "/assets")
+  -- Runtime glue moved out of page.html; include it so /assets/ refs there
+  -- are still audited.
+  let runtimePath := base ++ "/runtime.js"
+  let runtimeSrc ← if ← System.FilePath.pathExists runtimePath
+                   then IO.FS.readFile runtimePath else pure ""
+  auditAssets gameSrc (pageSrc ++ "\n" ++ runtimeSrc) (base ++ "/assets")
               (base ++ "/MISSING_ASSETS.txt")
+  auditButtons gameSrc runtimeSrc (base ++ "/MISSING_HANDLERS.txt")
+  /- Save-slot DB: create the table once so the first save just works.
+     SQLite is embedded, so this is a local file — no service to run. -/
+  initSaveDb
+  IO.println s!"  save DB: {← saveDbPath}"
   /- Use `serveConcurrent` because /api/ask can block on the LLM for
      several seconds; while it's blocked the user may still navigate
      the static page or fire another tab. -/

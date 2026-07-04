@@ -11,3 +11,7 @@ ChuHan/MISSING_ASSETS.txt.tmp
 .idea/
 .vscode/
 *.swp
+ChuHan/models/
+
+# runtime SQLite DB (saves + leaderboard)
+chuhan_saves.db

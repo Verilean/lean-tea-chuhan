@@ -23,8 +23,29 @@ Run:
 package «lean-tea-chuhan» where
   precompileModules := false
 
-/-- Pin to the current lean-tea main; bump the rev when the LeanTea /
-    LeanJs API changes. Use `lake update` to fetch the latest. -/
+/- Dependency source for LeanTea / LeanJs.
+
+   Default: the pinned upstream git rev (CI / release / fresh clones).
+   Bump with `lake update lean-tea`.
+
+   Local development: to build against a working copy of
+   `Verilean/lean-tea` (e.g. while extending LeanJs), point at it with
+   a Lake config flag or an env var, then run `lake update lean-tea`
+   once so the manifest picks up the new source:
+
+       lake -Klean_tea_dir=/abs/path/to/lean-elm update lean-tea
+       lake -Klean_tea_dir=/abs/path/to/lean-elm build chuhan_serve
+
+   or, equivalently, export the path once:
+
+       export LEANTEA_DIR=/abs/path/to/lean-elm
+       lake update lean-tea && lake build chuhan_serve
+
+   The flag wins over the env var; unset both to fall back to git. -/
+meta if ((get_config? lean_tea_dir) <|> (run_io (IO.getEnv "LEANTEA_DIR"))).isSome then
+require «lean-tea» from
+  (((get_config? lean_tea_dir) <|> (run_io (IO.getEnv "LEANTEA_DIR"))).getD "")
+else
 require «lean-tea» from git
   "https://github.com/Verilean/lean-tea.git" @ "main"
 
@@ -34,3 +55,9 @@ lean_lib ChuHanLib where
 /-- 楚漢恋歌 SPA + LLM TRPG server. -/
 lean_exe chuhan_serve where
   root := `ChuHan.Serve
+
+/-- Playwright button smoke test: drives a running server with a real
+    Chromium (`LeanTea.Browser`), auto-clicks every button, fails on any
+    runtime error. The runtime complement to `auditButtons`. -/
+lean_exe chuhan_e2e where
+  root := `ChuHan.E2E

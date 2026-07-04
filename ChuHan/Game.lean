@@ -18,14 +18,19 @@ private def candidates : List String := [
   "lean-elm/examples/ChuHan/Game.leanjs"
 ]
 
-def loadSource : IO String := do
+/-- Locate the entry `Game.leanjs` and return both its source and its
+    path. The path lets the include resolver find sibling files
+    (`Story.leanjs`, `Sandbox.leanjs`) relative to this file. -/
+def loadSourceAt : IO (String × String) := do
   for path in candidates do
     if ← System.FilePath.pathExists path then
       let src ← IO.FS.readFile path
       IO.eprintln s!"chuhan: loaded {src.utf8ByteSize} bytes from {path}"
-      return src
+      return (src, path)
   throw <| IO.userError <|
     "couldn't locate ChuHan/Game.leanjs — tried: "
     ++ String.intercalate ", " candidates
+
+def loadSource : IO String := (·.1) <$> loadSourceAt
 
 end ChuHan
