@@ -1316,10 +1316,11 @@ def renderSceneDialogue(state, step) :=
 def renderImprovBox(state) :=
   panel("dialogue", "", sjoin([
     "<div style='font-size:11px;color:#c8a86a;letter-spacing:1px;margin-bottom:6px'>― 筆はあなたの手に ―</div>",
-    "<div style='line-height:2;font-size:16px;color:#f0e6d2;margin-bottom:12px'>", hesc(state.improv.text), "</div>",
+    "<div style='line-height:2;font-size:16px;color:#f0e6d2;margin-bottom:12px;white-space:pre-wrap'>", hesc(state.improv.text), "</div>",
     "<input id='improvGo' placeholder='どうする? 何と言う?' style='width:100%;padding:9px;background:#0f0d0a;border:1px solid #4a3f2f;color:#eee;border-radius:6px;box-sizing:border-box'/>",
     "<div style='display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center'>",
     "<button id='improvGoBtn' class='btn btn-primary' style='font-size:13px'>綴る ▶（⌘/Ctrl+Enter）</button>",
+    "<button id='improvFinish' class='btn btn-ghost' style='font-size:12px'>▣ 物語を結ぶ</button>",
     button("ghost", {tag: "improvEnd"}, "台本へ戻る"),
     "<span id='improvStatus' style='font-size:11px;color:#8a7d63'></span>",
     "</div>"

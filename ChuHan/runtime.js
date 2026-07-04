@@ -646,20 +646,41 @@ function shijiFor(charId, text) {
 // the next narrative beat (地の文), keeping character + period voice.
 async function runBrowserStoryContinue(ctx, action) {
   const frag = shijiFor(ctx.charId, (ctx.history || []).map(h => h.content).join(' ') + ' ' + action);
-  const sys = 'あなたは楚漢戦争(紀元前3世紀の中国)を舞台にした対話型小説の語り手。' +
-    'プレイヤーは' + (ctx.char || '主人公') + '。その行動・台詞を受け、物語を次の一段へ進める。' +
-    '人物の性格と史実の空気を守り、地の文で描く。' + (ctx.persona ? ('関わる人物: ' + ctx.persona + '。') : '') +
-    (frag ? ('史記の原文を寄る辺にせよ:「' + frag.han + '」――' + frag.gloss + ' この史実と筆致に沿わせ、大きく逸脱しない。') : '') +
-    '厳守: 日本語で2〜3文・60〜130字。情景と人物の反応を描き、続きを促す余韻で締める。' +
+  const beats = Math.floor(((ctx.history || []).length) / 2);   // how far in we are
+  const climax = beats >= 4;                                    // start converging on the milestone
+  const sys = 'あなたは楚漢戦争(紀元前3世紀の中国)を舞台にした対話型歴史小説の語り手。' +
+    'プレイヤーは' + (ctx.char || '主人公') + '。その行動・台詞を受け、物語を次の一段へ確かに進める。' +
+    '地の文だけでなく、その場に居る人物には「」で肉声を語らせよ(項羽は誇り高く、范増は老獪、韓信は野心的、呂雉は冷徹…性格を守れ)。' +
+    (ctx.persona ? ('関わる人物: ' + ctx.persona + '。') : '') +
+    (frag ? ('この物語はやがて史記の一場面へ向かう――「' + frag.han + '」(' + frag.gloss + ')。'
+             + (climax ? 'そろそろその核心へ雪崩れ込ませ、緊張を高めよ。' : 'そこへ緩やかに引き寄せつつ、性急にはしない。')) : '') +
+    '厳守: 日本語で2〜4文・80〜180字。情景・人物の台詞・反応を描き、次の緊張や選択の余韻で締める。' +
     '説明・箇条書き・JSON・同じ表現の繰り返しは禁止。';
   const msgs = [{ role: 'system', content: sys }];
   for (const h of (ctx.history || []).slice(-8)) msgs.push(h);
   msgs.push({ role: 'user', content: (ctx.char || '主人公') + 'は――' + action });
-  const r = await webllm.engine.chat.completions.create({ messages: msgs, temperature: 0.85, max_tokens: 200 });
+  const r = await webllm.engine.chat.completions.create({ messages: msgs, temperature: 0.85, max_tokens: 260 });
   let t = (r.choices[0].message.content || '').trim();
-  const parts = t.split(/(?<=。)/).filter(x => x.trim());
-  t = parts.slice(0, 3).join('').trim();
-  return (t.length > 180 ? t.slice(0, 178) + '…' : t) || '（沈黙が流れた）';
+  const parts = t.split(/(?<=。|」)/).filter(x => x.trim());
+  t = parts.slice(0, 4).join('').trim();
+  return (t.length > 220 ? t.slice(0, 218) + '…' : t) || '（沈黙が流れた）';
+}
+
+// Close the improvised arc with a resonant ending, weighted by 史記.
+async function runBrowserStoryEnding(ctx) {
+  const frag = shijiFor(ctx.charId, (ctx.history || []).map(h => h.content).join(' '));
+  const sys = 'あなたは楚漢戦争の講談師。これまでのアドリブ物語に、余韻ある結末を与えよ。' +
+    (ctx.char || '主人公') + 'のこの道行きがどこへ辿り着いたかを、史実の重み' +
+    (frag ? ('(「' + frag.han + '」――' + frag.gloss + ')') : '') + 'を踏まえて描く。' +
+    '大団円でも悲劇でもよい。厳守: 日本語で3〜4文・100〜200字、地の文と肉声、余韻で締める。JSON・箇条書き禁止。';
+  const msgs = [{ role: 'system', content: sys }];
+  for (const h of (ctx.history || []).slice(-8)) msgs.push(h);
+  msgs.push({ role: 'user', content: 'この物語をここで結べ。' });
+  const r = await webllm.engine.chat.completions.create({ messages: msgs, temperature: 0.9, max_tokens: 320 });
+  let t = (r.choices[0].message.content || '').trim();
+  const parts = t.split(/(?<=。|」)/).filter(x => x.trim());
+  t = parts.slice(0, 5).join('').trim();
+  return (t.length > 240 ? t.slice(0, 238) + '…' : t) || '物語は、静かに幕を下ろした。';
 }
 
 // Paint a story background from a prompt and pin it behind the scene.
@@ -705,11 +726,33 @@ function wireStoryImprov() {
   const input = document.getElementById('improvGo');
   const go = document.getElementById('improvGoBtn');
   const st = document.getElementById('improvStatus');
-  if (!input || !go || go.dataset.wired) return;
-  go.dataset.wired = '1';
   const step = (typeof stepAt === 'function') ? stepAt(sceneOf(state.sceneId), state.beat) : {};
   const who = step.who || '';
   const ctx = { char: IMPROV_CHAR_NAME[state.char] || state.char, charId: state.char, persona: NPC_PERSONA[IMPROV_PERSONA_BY_NAME[who]] || '' };
+  // ▣ 物語を結ぶ: give the improvised arc a payoff (a coherent ending beat).
+  const fin = document.getElementById('improvFinish');
+  if (fin && !fin.dataset.wired) {
+    fin.dataset.wired = '1';
+    fin.addEventListener('click', async () => {
+      if (storyImprov.busy) return;
+      if (!webllm.ready && navigator.gpu) { if (st) st.textContent = 'AI 読み込み中…'; await loadBrowserAI(); }
+      if (!webllm.ready) { if (st) st.textContent = 'AI 起動が必要（WebGPU）'; return; }
+      storyImprov.busy = true;
+      if (st) st.textContent = '……物語が結ばれる';
+      try {
+        ctx.history = storyImprov.history;
+        const end = await runBrowserStoryEnding(ctx);
+        storyImprov.history.push({ role: 'assistant', content: end });
+        state = update({ tag: 'improvBeat', text: '― 結 ―\n' + end }, state);
+        persist(state); render();
+        const bgp = (typeof sbSceneEn === 'function') ? sbSceneEn(end) : 'an epic finale, ink wash';
+        genStoryBg(bgp).then(() => render());
+      } catch (e) { if (st) st.textContent = '（結末生成に失敗）'; }
+      storyImprov.busy = false;
+    });
+  }
+  if (!input || !go || go.dataset.wired) return;
+  go.dataset.wired = '1';
   const step2 = async () => {
     const text = input.value.trim();
     if (!text || storyImprov.busy) return;
