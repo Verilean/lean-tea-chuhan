@@ -55,3 +55,9 @@ lean_lib ChuHanLib where
 /-- 楚漢恋歌 SPA + LLM TRPG server. -/
 lean_exe chuhan_serve where
   root := `ChuHan.Serve
+
+/-- Playwright button smoke test: drives a running server with a real
+    Chromium (`LeanTea.Browser`), auto-clicks every button, fails on any
+    runtime error. The runtime complement to `auditButtons`. -/
+lean_exe chuhan_e2e where
+  root := `ChuHan.E2E
