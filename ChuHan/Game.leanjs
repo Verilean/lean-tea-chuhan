@@ -492,6 +492,21 @@ def update(msg, state) :=
       let cur := stepAt(scene, state.beat);
       if cur.ending != "" then state
       else if arrLen(cur.choices) > 0 then state
+      -- npcChat / aiResolve steps carry a gotoScene (the after-scene), so
+      -- these MUST be checked before cur.gotoScene — otherwise landing on
+      -- such a step (via a scene jump) skips straight past the chat.
+      else if cur.npcChat != "" then
+        { phase: "llm_chat", lang: state.lang,
+          char: state.char, sceneId: state.sceneId, beat: state.beat,
+          stats: state.stats, flags: state.flags,
+          battle: state.battle, endingId: state.endingId, toast: state.toast,
+          mini: state.mini, llm: initLlmFor(cur.npcChat, cur.gotoScene), resolve: state.resolve }
+      else if cur.aiResolveKind != "" then
+        { phase: "ai_resolve", lang: state.lang,
+          char: state.char, sceneId: state.sceneId, beat: state.beat,
+          stats: state.stats, flags: state.flags,
+          battle: state.battle, endingId: state.endingId, toast: state.toast,
+          mini: state.mini, llm: state.llm, resolve: initResolveFor(cur.aiResolveKind) }
       else if cur.gotoScene != "" then
         { phase: "scene", lang: state.lang,
           char: state.char, sceneId: cur.gotoScene, beat: 0,
