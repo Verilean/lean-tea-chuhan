@@ -233,7 +233,9 @@ window.chuhanAudio = (function () {
     const t0 = performance.now();
     function step(t) {
       const k = Math.min(1, (t - t0) / ms);
-      el.volume = from + (to - from) * k;
+      // Clamp: floating-point / overlapping fades can nudge this a hair
+      // outside [0,1], and the browser throws on an out-of-range volume.
+      el.volume = Math.max(0, Math.min(1, from + (to - from) * k));
       if (k < 1) requestAnimationFrame(step);
       else if (to === 0) { try { el.pause(); } catch (_) {} }
     }
