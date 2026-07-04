@@ -968,11 +968,23 @@ async function runBrowserGM(action, world) {
            action: j.action || null };
 }
 
+// Short personas so the small model actually stays in character.
+const NPC_PERSONA = {
+  miaorong: '蕭何の妻・妙容。聡明で芯が強く、夫が劉邦に賭けているのを見抜いている。静かだが鋭い。',
+  xiaohe:   '劉邦の宰相格・蕭何。律儀で実務に長け、己を抑え民政に尽くす。慎重で誠実。',
+  fanzeng:  '項羽の軍師・范増。老獪で先を読む。劉邦を早く除くべきと説くが容れられず苛立つ。',
+  huangshi: '張良に兵法を授けた隠者・黄石公。超然として謎めき、禅問答のように語る。',
+  xiangbo:  '項羽の叔父・項伯。情に厚く、鴻門で劉邦を庇った。義理と情に揺れる。',
+  kuaitong: '弁士・蒯通。韓信に天下三分を説く策士。野心を焚きつけ、雄弁に語る。'
+};
+
 // In-browser (WebLLM) NPC chat — same role as /api/ask, no server needed.
-async function runBrowserChat(npcName, history, message) {
-  const sys = 'あなたは楚漢戦争（紀元前209〜202年の中国）の登場人物「' + (npcName || '登場人物') + '」です。'
-    + 'その人物として、日本語で必ず1〜3文、自然に応答してください（空の返答は禁止）。'
-    + '時代や人物像を外さず、メタ発言や現代語の解説はしないこと。';
+async function runBrowserChat(npcId, npcName, history, message) {
+  const persona = NPC_PERSONA[npcId] || ('楚漢戦争の登場人物「' + (npcName || '登場人物') + '」');
+  const sys = 'あなたは' + persona
+    + ' 舞台は紀元前209〜202年の中国、乱世。この人物に成りきり、自分が誰かを忘れず、'
+    + '相手の言葉に具体的に反応して、日本語で必ず1〜3文で答える（空の返答は禁止）。'
+    + '同じ話の繰り返しや、現代語の説明・メタ発言はしないこと。';
   const msgs = [{ role: 'system', content: sys }];
   // Drop empty / placeholder turns (they poison the context and make the
   // small model emit more empties) and keep only the recent history.
@@ -1108,6 +1120,7 @@ function wireChatHandlers() {
     const text = input.value.trim();
     if (!text || state.llm.pending) return;
     input.value = '';
+    const npcId = state.llm.npcId;
     const npcName = state.llm.npcName;
     const hist = state.llm.history.slice();   // before pushing the user msg
     state = update({tag: 'llmSendUser', text: text}, state);
@@ -1117,7 +1130,7 @@ function wireChatHandlers() {
     // 1) in-browser WebLLM if loaded — no server LLM needed
     if (webllm.ready) {
       try {
-        const reply = await runBrowserChat(npcName, hist, text);
+        const reply = await runBrowserChat(npcId, npcName, hist, text);
         state = update({tag: 'llmReply', text: reply || '(空の応答)'}, state);
         done = true;
       } catch (e) { /* fall through to server */ }
@@ -1141,7 +1154,7 @@ function wireChatHandlers() {
       await loadBrowserAI();
       if (webllm.ready) {
         try {
-          const reply = await runBrowserChat(npcName, hist, text);
+          const reply = await runBrowserChat(npcId, npcName, hist, text);
           state = update({tag: 'llmReply', text: reply || '(空の応答)'}, state);
           done = true;
         } catch (e) { /* fall through */ }
