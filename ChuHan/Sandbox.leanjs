@@ -1461,12 +1461,13 @@ def viewSandbox(state) :=
     else sjoin([
       "<input id='gmInput' placeholder='劉邦として何をする? 例: エジプトを目指す' ",
       "style='width:100%;padding:9px;background:#0f0d0a;border:1px solid #4a3f2f;color:#eee;border-radius:6px;box-sizing:border-box'/>",
-      "<div style='display:flex;gap:8px;margin-top:8px;flex-wrap:wrap'>",
-      "<button id='gmSend' class='btn btn-primary'>行動する（⌘/Ctrl+Enter）</button>",
+      "<button id='gmSend' class='btn btn-primary' style='width:100%;margin-top:8px'>行動する（⌘/Ctrl+Enter）</button>",
+      -- コマンドは 2 列グリッドで整列(バラバラに折り返さない)。
+      "<div style='display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:8px'>",
       button("primary", {tag: "sbAdvance"}, "季を進める ▶"),
       button("primary", {tag: "sbSpecial"}, sbSpecialLabel(w.who)),
-      "<button id='sbAction' class='btn btn-primary'>🗡 出撃</button>",
-      "<button id='sbBattle' class='btn btn-ghost'>⚔ 会戦</button>",
+      "<button id='sbAction' class='btn btn-primary' style='width:100%'>🗡 出撃</button>",
+      "<button id='sbBattle' class='btn btn-ghost' style='width:100%'>⚔ 会戦</button>",
       "</div>",
       sbExpPanel(w.court),
       "<div style='display:flex;gap:8px;align-items:center;margin-top:8px;font-size:11px;color:#8a7d63;flex-wrap:wrap'>",
@@ -1490,8 +1491,6 @@ def viewSandbox(state) :=
     map,
     sbFactionBar(w.regions),
     sbRoster(w.court),
-    "<div style='text-align:center;color:#8a7d63;font-size:11px;margin-top:6px'>陣中 ― 兵たちが蠢く</div>",
-    "<canvas id='sbStage' width='520' height='150' style='width:100%;height:auto;display:block;margin:4px auto 0;background:linear-gradient(#1c1811,#100e0a);border:1px solid #4a3f2f;border-radius:8px'></canvas>",
     "</div>",
     -- 右:動静ログ・操作・画像
     "<div>",
