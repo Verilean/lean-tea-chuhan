@@ -591,9 +591,12 @@ async function genScene() {
         out[i * 4 + 2] = (px[2 * plane + i] * 0.5 + 0.5) * 255;
         out[i * 4 + 3] = 255;
       }
+      const imgData = new ImageData(out, W, H);
+      imggen.lastImg = imgData;           // keep it so re-renders can restore it
       canvas.width = W; canvas.height = H;
-      canvas.getContext('2d').putImageData(new ImageData(out, W, H), 0, 0);
+      canvas.getContext('2d').putImageData(imgData, 0, 0);
       canvas.style.display = 'block';
+      const det = canvas.closest('details'); if (det) det.open = true;
       imgStatus('（情景 更新）');
     } else imgStatus('（キャンバス未検出）');
   } catch (e) {
@@ -603,8 +606,22 @@ async function genScene() {
   }
 }
 
+// render() rebuilds #stage, so the freshly-created #sbScene canvas is blank
+// after every game action — re-draw the last generated image and re-open
+// the panel so the picture doesn't vanish the moment anything happens.
+function restoreScene() {
+  if (!imggen.lastImg) return;
+  const cv = document.getElementById('sbScene');
+  if (!cv) return;
+  cv.width = imggen.lastImg.width; cv.height = imggen.lastImg.height;
+  cv.getContext('2d').putImageData(imggen.lastImg, 0, 0);
+  cv.style.display = 'block';
+  const det = cv.closest('details'); if (det) det.open = true;
+}
+
 function wireImgGen() {
   const b = document.getElementById('imgGen');
+  restoreScene();                       // re-apply the last scene after a re-render
   if (!b || b.dataset.wired) return;
   b.dataset.wired = '1';
   b.addEventListener('click', genScene);
