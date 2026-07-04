@@ -69,7 +69,9 @@ def crawlerJs : String :=
     const sig = (stage ? stage.textContent.slice(0, 60) : '') + '|' + msg;
     sigc[sig] = (sigc[sig] || 0) + 1;
     if (sigc[sig] > 3) { if (btns.length === 1) break; else continue; }
-    try { pick.click(); clicks++; } catch (e) { errors.push('click threw [' + msg + ']: ' + e.message); }
+    // dispatch a real bubbling click (works for SVG nodes too — SVGElement
+    // has no .click() method, unlike HTMLElement) so the delegation fires.
+    try { pick.dispatchEvent(new MouseEvent('click', { bubbles: true })); clicks++; } catch (e) { errors.push('click threw [' + msg + ']: ' + e.message); }
     if (/concludeChat/.test(msg)) concludeClicked = true;
     await sleep(90);
   }
