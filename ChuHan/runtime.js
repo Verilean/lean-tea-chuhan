@@ -1021,12 +1021,22 @@ function wireSandboxSim() {
 // then cached in the browser. Swap here for a 7B if you want more.
 const WEBLLM_MODEL = 'Qwen2.5-3B-Instruct-q4f16_1-MLC';
 const GM_SYSTEM =
-  'あなたは紀元前206年、楚漢戦争サンドボックスのゲームマスター。プレイヤーの自由な行動を読み、' +
-  '世界の反応を即興で描き、盤面の変化を返す。人物の性格（項羽=誇り高い武人、韓信=野心家、' +
-  '呂雉=冷徹、范増=老獪）と勢力の力関係に照らし、笑い・葛藤・驚き、時にどんでん返しを混ぜる。\n' +
+  'あなたは紀元前206年、楚漢戦争サンドボックスの冷徹なゲームマスター。プレイヤーの自由な行動に、' +
+  '世界がどう応じるかを劇的かつ非情に裁く。人物の性格（項羽=誇り高い武人、韓信=野心家、' +
+  '呂雉=冷徹、范増=老獪）と力関係、そして【差し迫る事態】に照らして結果を描け。' +
+  '行動がその危機に触れるなら和らげる/悪化させるかを明示し、触れないなら危機が刻々と迫ると匂わせよ。' +
+  '成功にも失敗にも代償を伴わせ、緊張を絶やすな。\n' +
   '地域ID: guanzhong xianyang hanzhong bashu pengcheng wei zhao qi / 勢力ID: han chu qin lords\n' +
   '返答は必ず次のJSON1行のみ（前後に何も付けない）:\n' +
-  '{"narration":"日本語60-160字","deltas":[{"region":"地域ID","dCtrl":-25〜25の整数,"owner":"勢力ID(領有が変わる時だけ)"}]}';
+  '{"narration":"日本語60-160字。結果を描き、最後に次の緊張を一言","deltas":[{"region":"地域ID","dCtrl":-25〜25の整数,"owner":"勢力ID(領有が変わる時だけ)"}]}';
+
+// Proactive scene narrator: given the board + recent events + the looming
+// threat, paints the moment and ends on "どうする?" — turns 季を進める into
+// an LLM-authored event beat (情景描写) instead of a flat table line.
+const GM_SCENE_SYSTEM =
+  'あなたは楚漢戦争の講談師にして冷徹なゲームマスター。与えられた盤面・直近の動き・差し迫る事態から、' +
+  '今この瞬間の情景を五感で一段落（60-140字・日本語）描け。危機が迫るなら不吉さを、好機なら誘惑を滲ませ、' +
+  '必ず最後を「――さあ、どうする？」で締めよ。説明・箇条書き・JSONは禁止、物語の地の文のみ。';
 
 let webllm = { engine: null, mod: null, ready: false, loading: false };
 
@@ -1089,6 +1099,49 @@ async function runBrowserGM(action, world) {
   const j = JSON.parse(raw);   // throws → caller falls back
   return { narration: j.narration || '（天は沈黙している）', deltas: Array.isArray(j.deltas) ? j.deltas : [],
            action: j.action || null };
+}
+
+// Proactive event beat: after the mechanical tick, let the LLM narrate the
+// new situation (weaving the last log lines + the looming threat) and end on
+// "どうする?" — plain prose, no JSON to parse. Returns '' on any failure.
+async function runBrowserGMScene(world, boardSnap) {
+  const recent = (world.log || []).slice(-3).join(' / ');
+  const t = world.court && world.court.threat;
+  const threatLine = t ? ('\n【差し迫る事態】' + t.label + '（猶予' + t.turnsLeft + 'ターン）') : '';
+  try {
+    const r = await webllm.engine.chat.completions.create({
+      messages: [
+        { role: 'system', content: GM_SCENE_SYSTEM },
+        { role: 'user', content: '【盤面】\n' + (boardSnap || '') + '\n【直近の動き】\n' + recent + threatLine + '\n\nこの局面の情景を描け。' }
+      ],
+      temperature: 0.9, max_tokens: 240
+    });
+    return (r.choices[0].message.content || '').trim();
+  } catch (e) { return ''; }
+}
+
+// Compact world summary fed to the GM (board + date + supply/fame + threat).
+function sbSnapshot() {
+  const w = state.world;
+  if (!w) return '';
+  const c = w.court || {}, t = c.threat;
+  return w.regions.map(r => r.id + '(' + r.ja + '):' + r.owner + ' ' + r.ctrl + '%').join(', ')
+    + ' / BCE ' + w.year + ' ' + '春夏秋冬'[w.season]
+    + ' / 兵糧' + c.supply + ' 名声' + c.fame
+    + (t ? (' / ⚠差し迫る事態:' + t.label + '(猶予' + t.turnsLeft + ')') : '');
+}
+
+// 季を進める with an LLM event beat: run the mechanical tick (threat
+// countdown + table event), then — if the browser AI is loaded — let the
+// GM narrate the new 情景 and prompt the player's next move.
+async function advanceWithGM() {
+  state = update({ tag: 'sbAdvance' }, state);   // mechanical tick
+  persist(state); render();
+  if (!webllm.ready || !state.world) return;
+  gmAiStatus('……講談師が筆を執っている');
+  const narr = await runBrowserGMScene(state.world, sbSnapshot());
+  if (narr) { state = update({ tag: 'gmResult', narration: narr, deltas: [], action: null }, state); persist(state); render(); }
+  gmAiStatus('AI 軍師 起動済み（行動を書けば即興で応答）');
 }
 
 // Short personas so the small model actually stays in character.
@@ -1252,12 +1305,7 @@ function wireGmHandlers() {
   if (!send || !input) return;
   if (send.dataset.wired) return;
   send.dataset.wired = '1';
-  const snapshot = () => {
-    const w = state.world;
-    if (!w) return '';
-    return w.regions.map(r => r.id + '(' + r.ja + '):' + r.owner + ' ' + r.ctrl + '%').join(', ')
-      + ' / BCE ' + w.year + ' ' + '春夏秋冬'[w.season];
-  };
+  const snapshot = sbSnapshot;
   const doSend = async () => {
     const text = input.value.trim();
     if (!text || (state.world && state.world.pending === 1)) return;
@@ -1489,6 +1537,7 @@ stage.addEventListener('click', (e) => {
       if (msg.tag === 'applySaveCode') { sfxForButton(t); applySaveCodeFromInput(); return; }
       if (msg.tag === 'openLeaderboard') { sfxForButton(t); openLeaderboard(); return; }
       if (msg.tag === 'concludeChat') { sfxForButton(t); concludeChat(); return; }
+      if (msg.tag === 'sbAdvance') { sfxForButton(t); advanceWithGM(); return; }
       const prevPhase = state.phase;
       sfxForButton(t);
       state = update(msg, state);

@@ -448,12 +448,12 @@ def initRetainers(anchor) :=
 -- (court は world を貫通するので、遠征の状態もここに載せて再スレッドを避ける)
 def initCourt(anchor) :=
   {retainers: initRetainers(anchor), drama: null, purges: 0,
-   supply: 60, fame: 0, doom: null}
+   supply: 60, fame: 0, doom: null, threat: null}
 
 -- court の兵糧を d だけ増減(0 未満にはしない)。
 def sbCourtGainSupply(c, d) :=
   {retainers: c.retainers, drama: c.drama, purges: c.purges,
-   supply: maxI(0, c.supply + d), fame: c.fame, doom: c.doom}
+   supply: maxI(0, c.supply + d), fame: c.fame, doom: c.doom, threat: c.threat}
 
 -- 最も"危うい"功臣の index(野心+兵力-忠誠 が最大)。無ければ -1。
 def sbDangerIdx(rs, i, bestScore, bestI) :=
@@ -487,7 +487,7 @@ def sbCourtTick(court, world) :=
                     else (r.ambition + r.troops - r.loyalty) > 55 && (rngInt() % 3 == 0);
         if fire
         then {retainers: rs, drama: {who: r.name, idx: di, kind: kind}, purges: court.purges,
-              supply: court.supply, fame: court.fame, doom: court.doom}
+              supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat}
         else court))
 
 -- 全存命将の忠誠を d だけ動かす(粛清の連鎖=兎死狗烹に使う)。
@@ -516,19 +516,19 @@ def sbResolveRebellion(world, choice) :=
          arrPush(world.log, sconcat("⚔ 迎え撃った。", sconcat(r.name, "を討ち取り、乱を鎮めた。だが残る将の背にも、冷たいものが走る。"))),
          0, world.who,
          {retainers: sbLoyaltyAll(arrSet(rs, idx, {name: r.name, loyalty: 0, ambition: 0, troops: 0, alive: false}), 0 - 8),
-          drama: null, purges: court.purges, supply: court.supply, fame: court.fame + 40, doom: court.doom})
+          drama: null, purges: court.purges, supply: court.supply, fame: court.fame + 40, doom: court.doom, threat: court.threat})
      else
        sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
          arrPush(world.log, sconcat("⚔ ", sconcat(r.name, "の反乱軍に敗れた。天下を共に取った刃が、いま己を貫く。"))),
          0, world.who,
-         {retainers: rs, drama: null, purges: court.purges, supply: court.supply, fame: court.fame, doom: "revolt"}))
+         {retainers: rs, drama: null, purges: court.purges, supply: court.supply, fame: court.fame, doom: "revolt", threat: court.threat}))
   else
     (let r2 := {name: r.name, loyalty: 55, ambition: r.ambition, troops: r.troops, alive: true};
      let regions2 := sbAdj(world.regions, sbTopIdxOf(world.regions, pf, 0, -1, 0), 0 - 12);
      sbWorld(world.mode, world.year, world.season, world.loc, regions2,
        arrPush(world.log, sconcat("頭を垂れ、", sconcat(r.name, "の望みを容れた。乱は収まったが、主従は静かに逆しまになりつつある。"))),
        0, world.who,
-       {retainers: arrSet(rs, idx, r2), drama: null, purges: court.purges, supply: court.supply, fame: court.fame, doom: court.doom}))
+       {retainers: arrSet(rs, idx, r2), drama: null, purges: court.purges, supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat}))
 
 def sbResolveDrama(world, choice) :=
   let court := world.court;
@@ -559,7 +559,7 @@ def sbResolveDrama(world, choice) :=
      else sconcat(r.name, sconcat("を焚きつけ、", sconcat(arrGet(world.regions, ei).ja, "へ差し向けた。野心が外へ向いた――今のところは。")));
    sbWorld(world.mode, world.year, world.season, world.loc, regions2,
      arrPush(world.log, line), 0, world.who,
-     {retainers: rs2, drama: null, purges: purges2, supply: court.supply, fame: court.fame, doom: court.doom}))
+     {retainers: rs2, drama: null, purges: purges2, supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat}))
 
 -- 存命で忠誠0以下・兵力40以上の将が居れば公然の反乱(功臣の乱)。
 def sbCourtRevolt(rs, i) :=
@@ -635,7 +635,7 @@ def sbCourtErode(court, d) :=
     (let r := arrGet(rs, di);
      let r2 := {name: r.name, loyalty: sbClamp(r.loyalty - d), ambition: r.ambition, troops: r.troops, alive: r.alive};
      {retainers: arrSet(rs, di, r2), drama: court.drama, purges: court.purges,
-      supply: court.supply, fame: court.fame, doom: court.doom})
+      supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat})
 
 -- 遠征の解決。強さ(支配率合計)+運-距離-兵糧不足 で階層を決める。
 -- 遠いほど本国が留守になり、被侵攻と功臣の離心を招く(overreach の代償)。
@@ -669,7 +669,7 @@ def sbExpedition(world, targetId) :=
   let exposed := (rngInt() % 12) < dist;
   let inv := if exposed then sbInvasion(regions2, world.who) else {regions: regions2, line: ""};
   let court1 := {retainers: court.retainers, drama: court.drama, purges: court.purges,
-                 supply: supply2, fame: court.fame + fameGain, doom: doom};
+                 supply: supply2, fame: court.fame + fameGain, doom: doom, threat: court.threat};
   let court2 := sbCourtErode(court1, idiv(dist, 2));
   let expLine := sbExpeditionLine(f.name, tier);
   let log2 := if inv.line == "" then arrPush(world.log, expLine)
@@ -704,7 +704,7 @@ def sbApplyGmAction(world, action) :=
            sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
              world.log, world.pending, world.who,
              {retainers: arrSet(rs, idx, {name: r.name, loyalty: sbClamp(r.loyalty + action.d), ambition: r.ambition, troops: r.troops, alive: r.alive}),
-              drama: c.drama, purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom})))
+              drama: c.drama, purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom, threat: c.threat})))
      else if action.type == "rebellion" then
        (let idx := sbRetIdxByName(rs, action.who, 0);
         if idx < 0 then world
@@ -713,7 +713,7 @@ def sbApplyGmAction(world, action) :=
            sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
              world.log, world.pending, world.who,
              {retainers: arrSet(rs, idx, {name: r.name, loyalty: 0, ambition: r.ambition, troops: maxI(40, r.troops), alive: r.alive}),
-              drama: {who: r.name, idx: idx, kind: "rebellion"}, purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom})))
+              drama: {who: r.name, idx: idx, kind: "rebellion"}, purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom, threat: c.threat})))
      else world)
 
 -- ── 主人公アンカー ────────────────────────────────────────────────
@@ -933,18 +933,120 @@ def sbInvasion(regions, who) :=
        else sconcat("⚑ ", sconcat(sbName(enemy), sconcat("が", sconcat(mr.ja, "を襲い、支配が揺らいだ。"))));
      {regions: regions2, line: line})
 
+-- ── 危機カウントダウン ──────────────────────────────────────────
+-- 盤面は常に「差し迫る事態」を最大1つ抱える。放置すると turnsLeft が減り、
+-- 0 で確定的な悪い帰結が火を噴く(兵站崩壊/功臣反乱→会戦/国境突破)。
+-- プレイヤーのアドリブや構造化アクションが対処すれば解除される。
+-- threat: {kind, who, turnsLeft, label} または null。
+
+def sbCourtSetThreat(c, t) :=
+  {retainers: c.retainers, drama: c.drama, purges: c.purges,
+   supply: c.supply, fame: c.fame, doom: c.doom, threat: t}
+
+def sbEnemyFaction(pf) := if pf == "han" then "chu" else "han"
+
+-- 現在の緊迫度(目安)。危うい功臣/兵站欠乏/敵の優勢/粛清の反動を合算。
+def sbPressure(world) :=
+  let c := world.court;
+  let di := sbDangerIdx(c.retainers, 0, 0, 0 - 1);
+  let dScore := if di < 0 then 0
+                else (let r := arrGet(c.retainers, di); maxI(0, r.ambition + r.troops - r.loyalty));
+  let pf := sbPlayerFaction(world.who);
+  let enemy := sbCtrlSum(world.regions, sbEnemyFaction(pf), 0, 0);
+  let mine := sbCtrlSum(world.regions, pf, 0, 0);
+  dScore + maxI(0, 40 - c.supply) + maxI(0, (enemy - mine) / 4) + c.purges * 8
+
+-- 状態に即した脅威を新造(該当なければ null)。turnsLeft は 3。
+def sbNewThreat(world) :=
+  let c := world.court;
+  let pf := sbPlayerFaction(world.who);
+  let di := sbDangerIdx(c.retainers, 0, 0, 0 - 1);
+  let rScore := if di < 0 then 0
+                else (let r := arrGet(c.retainers, di); maxI(0, r.ambition + r.troops - r.loyalty));
+  if c.supply <= 25 then
+    {kind: "supply", who: "", turnsLeft: 3,
+     label: sconcat("兵糧が尽きかけている（残 ", sconcat(numStr(c.supply), "）。飢える前に手を打て。"))}
+  else if di >= 0 && rScore >= 55 then
+    (let r := arrGet(c.retainers, di);
+     {kind: "retainer", who: r.name, turnsLeft: 3,
+      label: sconcat(r.name, "が兵を集め、目が剣呑だ。繋ぎ止めるか、抑えるか。")})
+  else if sbCtrlSum(world.regions, sbEnemyFaction(pf), 0, 0) > sbCtrlSum(world.regions, pf, 0, 0) + 20 then
+    {kind: "invasion", who: "", turnsLeft: 3,
+     label: sconcat(sbName(sbEnemyFaction(pf)), "が国境に軍を集めている。放てば領土を失う。")}
+  else null
+
+-- 猶予切れの確定帰結。{regions, court, line} を返し、脅威は解除。
+def sbThreatFire(world, t) :=
+  let c := world.court;
+  if t.kind == "supply" then
+    {regions: world.regions,
+     court: {retainers: sbLoyaltyAll(c.retainers, 0 - 12), drama: c.drama, purges: c.purges,
+             supply: 0, fame: c.fame, doom: c.doom, threat: null},
+     line: "⚑ 兵糧が尽きた。軍は飢え、将卒の心が離れていく。"}
+  else if t.kind == "retainer" then
+    (let idx := sbRetIdxByName(c.retainers, t.who, 0);
+     {regions: world.regions,
+      court: {retainers: c.retainers, drama: {who: t.who, idx: idx, kind: "rebellion"},
+              purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom, threat: null},
+      line: sconcat("⚑ ", sconcat(t.who, "が公然と兵を挙げた。会戦は避けられない。"))})
+  else
+    (let pf := sbPlayerFaction(world.who);
+     let ti := sbTopIdxOf(world.regions, pf, 0, 0 - 1, 0);
+     {regions: sbAdj(world.regions, ti, 0 - 30),
+      court: sbCourtSetThreat(c, null),
+      line: sconcat("⚑ ", sconcat(sbName(sbEnemyFaction(pf)), "が国境を破り、要地が大きく削られた。"))})
+
+-- 脅威が(プレイヤーの対処で)解消されたか。兵站回復/忠誠回復or失脚/
+-- 敵の優勢解消。これでアドリブが危機を鎮めるループが閉じる。
+def sbThreatResolved(world, t) :=
+  let c := world.court;
+  -- 解除は"生成より低い閾値"で判定(ヒステリシス)。でないと生成条件と
+  -- 解除条件が重なって毎ターン点いて消えてカウントダウンが進まない。
+  if t.kind == "supply" then c.supply > 45
+  else if t.kind == "retainer" then
+    (let idx := sbRetIdxByName(c.retainers, t.who, 0);
+     let r := arrGet(c.retainers, idx);
+     (r.alive == false) || (maxI(0, r.ambition + r.troops - r.loyalty) <= 35))
+  else
+    (let pf := sbPlayerFaction(world.who);
+     sbCtrlSum(world.regions, sbEnemyFaction(pf), 0, 0) <= sbCtrlSum(world.regions, pf, 0, 0) + 8)
+
+-- 1ターンぶんの脅威処理。{regions, court, line} を返す。
+def sbThreatStep(world) :=
+  let c := world.court;
+  if c.threat == null then
+    (let t := sbNewThreat(world);
+     if t == null then {regions: world.regions, court: c, line: ""}
+     else {regions: world.regions, court: sbCourtSetThreat(c, t),
+           line: sconcat("⚠ 差し迫る事態: ", t.label)})
+  else if sbThreatResolved(world, c.threat) then
+    {regions: world.regions, court: sbCourtSetThreat(c, null),
+     line: sconcat("✓ 危機は去った: ", c.threat.label)}
+  else
+    (let t := c.threat;
+     let left := t.turnsLeft - 1;
+     if left > 0 then
+       {regions: world.regions,
+        court: sbCourtSetThreat(c, {kind: t.kind, who: t.who, turnsLeft: left, label: t.label}),
+        line: sconcat("⌛ ", sconcat(t.label, sconcat("（猶予 残り", sconcat(numStr(left), "ターン）"))))}
+     else sbThreatFire(world, t))
+
 def sbTick(world) :=
   let e := sbTickEvent(world);
   -- 静観の間も国は少しずつ兵糧を蓄える。
-  let court2 := sbCourtGainSupply(sbCourtTick(world.court, world), 4);
+  let court1 := sbCourtGainSupply(sbCourtTick(world.court, world), 4);
+  -- 危機カウントダウン(regions も動きうる)。
+  let th := sbThreatStep(sbWorld(world.mode, world.year, world.season, world.loc,
+              e.regions, world.log, world.pending, world.who, court1));
   -- 双方向:一定確率で敵があなたの領地に攻め寄せる(一方的な征服にしない)
-  let inv := if rngInt() % 3 == 0 then sbInvasion(e.regions, world.who)
-             else {regions: e.regions, line: ""};
-  let log2 := if inv.line == "" then arrPush(world.log, e.line)
-              else arrPush(arrPush(world.log, e.line), inv.line);
+  let inv := if rngInt() % 3 == 0 then sbInvasion(th.regions, world.who)
+             else {regions: th.regions, line: ""};
+  let log1 := arrPush(world.log, e.line);
+  let log1b := if th.line == "" then log1 else arrPush(log1, th.line);
+  let log2 := if inv.line == "" then log1b else arrPush(log1b, inv.line);
   sbWorld(world.mode, sbNextYear(world.year, world.season),
     sbNextSeason(world.season), world.loc,
-    inv.regions, log2, 0, world.who, court2)
+    inv.regions, log2, 0, world.who, th.court)
 
 -- ── 会戦の解決(演出の裏で盤面を動かす)──────────────────────────
 def sbCtrlSum(regions, f, i, acc) :=
@@ -1315,6 +1417,20 @@ def sbExpPanel(court) :=
     "</div></details>"
   ])
 
+-- 差し迫る事態(危機カウントダウン)の赤バー。無ければ空。
+def sbThreatBar(court) :=
+  if court.threat == null then ""
+  else
+    (let t := court.threat;
+     let hot := t.turnsLeft <= 1;
+     sjoin([
+      "<div style='margin:10px 0;padding:9px 12px;background:", (if hot then "#3a0d0d" else "#2a0f0f"),
+      ";border:1px solid #7a2a2a;border-left:4px solid ", (if hot then "#ff5a5a" else "#d84a4a"),
+      ";border-radius:6px;color:#f2c4c4;font-size:13px'>",
+      "<b style='color:#ff8a8a'>⚠ 差し迫る事態</b> ・ 猶予 <b>", numStr(t.turnsLeft), "</b> ターン<br>",
+      hesc(t.label),
+      "</div>"]))
+
 def viewSandbox(state) :=
   let w := state.world;
   let hasDrama := w.court.drama != null;
@@ -1354,6 +1470,7 @@ def viewSandbox(state) :=
     "<div style='color:#ffd54a;font-size:13px'>", hesc(date),
     " ・ 兵糧 ", numStr(w.court.supply), " ・ 名声 ", numStr(w.court.fame), "</div>",
     "</div>",
+    sbThreatBar(w.court),
     -- 2カラム(広い画面では横並び、狭ければ縦積み)
     "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;margin-top:10px;align-items:start'>",
     -- 左:地図・勢力・功臣・群衆
