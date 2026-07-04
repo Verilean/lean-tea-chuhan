@@ -589,9 +589,8 @@ def sbFrontierAt(fs, id, i) :=
     (if arrGet(fs, i).id == id then arrGet(fs, i) else sbFrontierAt(fs, id, i + 1))
   else arrGet(fs, 0)
 
--- 自由入力に遠方地名が含まれれば、その遠征先 id を返す(無ければ "")。
--- 「エジプトを目指す」等 → 兵站モデル(sbExpedition)を起動する橋渡し。
-def sbExpeditionIntent(text) :=
+-- 入力に含まれる遠方地名 → 遠征先 id(無ければ "")。
+def sbFrontierNamed(text) :=
   if reTest(text, "エジプト|大秦") == 1 then "daqin"
   else if reTest(text, "日本|倭") == 1 then "wa"
   else if reTest(text, "匈奴") == 1 then "xiongnu"
@@ -602,6 +601,17 @@ def sbExpeditionIntent(text) :=
   else if reTest(text, "身毒|印度|インド|天竺") == 1 then "shendu"
   else if reTest(text, "安息|波斯|ペルシャ|パルティア") == 1 then "anxi"
   else ""
+
+-- 兵站モデル(sbExpedition)を起動するのは「軍を動かす」意図がある時だけ。
+-- 使者・親書・交渉などの外交は対象外(軍を進めない)。地名だけ/曖昧は
+-- GM に委ねる("" を返すと通常の GM 処理へ流れる)。
+def sbExpeditionIntent(text) :=
+  let place := sbFrontierNamed(text);
+  if place == "" then ""
+  else
+    (let march := reTest(text, "遠征|攻|征伐|征討|討|進軍|出兵|侵攻|兵を|軍を|大軍|向か|目指|渡海") == 1;
+     let diplo := reTest(text, "使者|使い|親書|書を|文を|交渉|同盟|講和|貢|贈") == 1;
+     if march && (diplo == false) then place else "")
 
 -- 結果の語り(tier 4 大成功 … 0 壊滅)。
 def sbExpeditionLine(name, tier) :=
@@ -1364,7 +1374,7 @@ def viewSandbox(state) :=
     "<div style='font-size:12px;color:#9a8d73;margin-bottom:4px'>動静</div>",
     sbLog(w.log),
     "</div>",
-    "<details style='margin-top:8px'><summary style='cursor:pointer;color:#8a7d63;font-size:12px'>🎨 この情景を描く（実験的・WebGPU）</summary>",
+    "<details style='margin-top:8px'><summary style='cursor:pointer;color:#8a7d63;font-size:12px'>🎨 この情景を描く（実験的・WebGPU・初回モデルDL大）</summary>",
     "<div style='display:flex;gap:8px;align-items:center;margin-top:6px;font-size:12px;color:#9a8d73;flex-wrap:wrap'>",
     "<button id='imgGen' class='btn btn-ghost' style='font-size:12px'>描く</button><span id='imgStatus'></span></div>",
     "<canvas id='sbScene' width='512' height='512' style='display:none;width:100%;max-width:300px;height:auto;margin:8px auto 0;border-radius:8px;border:1px solid #4a3f2f'></canvas>",
