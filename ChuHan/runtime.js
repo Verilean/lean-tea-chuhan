@@ -321,6 +321,7 @@ function render() {
   wireAtmo();
   wireBattle();
   wireImgGen();
+  wireStoryImprov();
   wireAction();
 }
 
@@ -340,7 +341,7 @@ function ensureActionOverlay() {
   ov.innerHTML =
     "<div id='actionHud' style='color:#f0e6d2;margin-bottom:6px;font-size:14px'></div>" +
     "<canvas id='actionCanvas' width='720' height='420' style='max-width:94vw;height:auto;background:#14110c;border:1px solid #4a3f2f;border-radius:8px'></canvas>" +
-    "<div style='color:#9a8d73;font-size:12px;margin-top:6px'>WASD / 矢印 = 移動 ・ J / Space = 斬撃 ・ ESC = 退却</div>" +
+    "<div style='color:#9a8d73;font-size:12px;margin-top:6px'>← → / A D = 間合い ・ J / Space = 斬りかかる ・ K / S = 受け(ガード) ・ ESC = 退却</div>" +
     "<button id='actionClose' class='btn btn-ghost' style='margin-top:8px;display:none'>戻る</button>";
   document.body.appendChild(ov);
   ov.querySelector('#actionClose').addEventListener('click', () => finishAction());
@@ -361,8 +362,8 @@ function actionFrame() {
   actionDraw(ctx, action.st, W, H);                       // compiled LeanJs
   const st = action.st;
   document.getElementById('actionHud').textContent =
-    'HP ' + Math.max(0, st.hp) + '  ・  討取 ' + st.kills + ' / ' + st.target +
-    (st.over ? (st.win ? '  ― 勝利！' : '  ― 敗走…') : '');
+    st.over ? (st.win ? '― 勝利！ 敵将を討ち取った' : '― 敗走…')
+            : (st.pName + '  ' + Math.round(st.p.hp) + '  対  ' + Math.round(st.e.hp) + '  ' + st.eName);
   if (st.over && !wasOver) showActionEnd();
   action.raf = requestAnimationFrame(actionFrame);
 }
@@ -385,7 +386,14 @@ function openAction() {
   ov.style.display = 'flex';
   ov.querySelector('#actionClose').style.display = 'none';
   const c = document.getElementById('actionCanvas');
-  action.st = actionInitState(c.width, c.height);   // compiled LeanJs
+  // 自軍将 × 敵将の名前を盤面から決める。
+  let pName = '我が将', eName = '敵将';
+  try {
+    const pf = sbPlayerFaction(state.world.who);
+    const ef = (pf === 'han') ? 'chu' : 'han';
+    pName = state.world.who; eName = sbNotableLabel(ef);
+  } catch (e) {}
+  action.st = actionInitState(c.width, c.height, pName, eName);   // compiled LeanJs
   action.keys = {};
   if (!action.kb){ document.addEventListener('keydown', actionKeyDown); document.addEventListener('keyup', actionKeyUp); action.kb = true; }
   action.raf = requestAnimationFrame(actionFrame);
@@ -547,53 +555,61 @@ async function imgEmbed(text) {
   return out[imggen.enc.outputNames[0]];   // last_hidden_state [1,77,1024]
 }
 
+// Core WebGPU txt2img: prompt → 512x512 ImageData. Assumes imggen.ready.
+// Shared by the sandbox scene (#sbScene) and the story background painter.
+async function imgGenerate(prompt) {
+  const Tensor = imggen.ort.Tensor;
+  const H = 512, W = 512, LH = 64, LW = 64, C = 4, n = C * LH * LW, guidance = 7.5;
+  const condE = await imgEmbed(prompt);
+  const uncondE = await imgEmbed('lowres, blurry, ugly, deformed, text, watermark');
+  const { sigmas, initNoiseSigma } = imgSetTimesteps(IMG_STEPS);
+  const lat = new Float32Array(n);
+  let seed = ((Date.now() & 0xffff) ^ 0x9e37) >>> 0;
+  const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; const u1 = (seed >>> 8) / 16777216; seed = (seed * 1664525 + 1013904223) >>> 0; const u2 = (seed >>> 8) / 16777216; return Math.sqrt(-2 * Math.log(u1 + 1e-9)) * Math.cos(6.283185 * u2); };
+  for (let i = 0; i < n; i++) lat[i] = rnd() * initNoiseSigma;
+  for (let s = 0; s < IMG_STEPS; s++) {
+    const sigma = sigmas[s], cIn = 1 / Math.sqrt(sigma * sigma + 1);
+    const scaled = new Float32Array(n); for (let i = 0; i < n; i++) scaled[i] = lat[i] * cIn;
+    const sample = new Tensor('float32', scaled, [1, C, LH, LW]);
+    const ts = new Tensor('float32', Float32Array.from([imgSigmaToT(sigma)]), [1]);
+    const rc = await imggen.unet.run({ sample, timestep: ts, encoder_hidden_states: condE });
+    const ru = await imggen.unet.run({ sample, timestep: ts, encoder_hidden_states: uncondE });
+    const nc = rc[imggen.unet.outputNames[0]].data, nu = ru[imggen.unet.outputNames[0]].data;
+    const dt = sigmas[s + 1] - sigma;
+    for (let i = 0; i < n; i++) {
+      const noise = nu[i] + guidance * (nc[i] - nu[i]);
+      const denoised = lat[i] - sigma * noise;            // x0 prediction
+      lat[i] = lat[i] + ((lat[i] - denoised) / sigma) * dt; // Euler step
+    }
+    imgStatus('描画 ' + (s + 1) + '/' + IMG_STEPS);
+  }
+  const dl = new Float32Array(n); for (let i = 0; i < n; i++) dl[i] = lat[i] / 0.18215;
+  const dec = await imggen.vae.run({ latent_sample: new Tensor('float32', dl, [1, C, LH, LW]) });
+  const px = dec[imggen.vae.outputNames[0]].data;          // [1,3,512,512] in [-1,1]
+  const out = new Uint8ClampedArray(W * H * 4), plane = W * H;
+  for (let i = 0; i < plane; i++) {
+    out[i * 4] = (px[i] * 0.5 + 0.5) * 255;
+    out[i * 4 + 1] = (px[plane + i] * 0.5 + 0.5) * 255;
+    out[i * 4 + 2] = (px[2 * plane + i] * 0.5 + 0.5) * 255;
+    out[i * 4 + 3] = 255;
+  }
+  return new ImageData(out, W, H);
+}
+
 async function genScene() {
   if (imggen.busy) return;
   if (!imggen.ready) { const ok = await loadImgGen(); if (!ok) return; }
   imggen.busy = true;
   imgStatus('筆を執っている…');
   try {
-    const Tensor = imggen.ort.Tensor;
-    const H = 512, W = 512, LH = 64, LW = 64, C = 4, n = C * LH * LW, guidance = 7.5;
-    const condE = await imgEmbed(scenePrompt());
-    const uncondE = await imgEmbed('lowres, blurry, ugly, deformed, text, watermark');
-    const { sigmas, initNoiseSigma } = imgSetTimesteps(IMG_STEPS);
-    // init latents ~ N(0,1) * initNoiseSigma (deterministic LCG-Gaussian)
-    const lat = new Float32Array(n);
-    let seed = ((Date.now() & 0xffff) ^ 0x9e37) >>> 0;
-    const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; const u1 = (seed >>> 8) / 16777216; seed = (seed * 1664525 + 1013904223) >>> 0; const u2 = (seed >>> 8) / 16777216; return Math.sqrt(-2 * Math.log(u1 + 1e-9)) * Math.cos(6.283185 * u2); };
-    for (let i = 0; i < n; i++) lat[i] = rnd() * initNoiseSigma;
-    for (let s = 0; s < IMG_STEPS; s++) {
-      const sigma = sigmas[s], cIn = 1 / Math.sqrt(sigma * sigma + 1);
-      const scaled = new Float32Array(n); for (let i = 0; i < n; i++) scaled[i] = lat[i] * cIn;
-      const sample = new Tensor('float32', scaled, [1, C, LH, LW]);
-      const ts = new Tensor('float32', Float32Array.from([imgSigmaToT(sigma)]), [1]);
-      const rc = await imggen.unet.run({ sample, timestep: ts, encoder_hidden_states: condE });
-      const ru = await imggen.unet.run({ sample, timestep: ts, encoder_hidden_states: uncondE });
-      const nc = rc[imggen.unet.outputNames[0]].data, nu = ru[imggen.unet.outputNames[0]].data;
-      const dt = sigmas[s + 1] - sigma;
-      for (let i = 0; i < n; i++) {
-        const noise = nu[i] + guidance * (nc[i] - nu[i]);
-        const denoised = lat[i] - sigma * noise;            // x0 prediction
-        lat[i] = lat[i] + ((lat[i] - denoised) / sigma) * dt; // Euler step
-      }
-      imgStatus('描画 ' + (s + 1) + '/' + IMG_STEPS);
-    }
-    const dl = new Float32Array(n); for (let i = 0; i < n; i++) dl[i] = lat[i] / 0.18215;
-    const dec = await imggen.vae.run({ latent_sample: new Tensor('float32', dl, [1, C, LH, LW]) });
-    const px = dec[imggen.vae.outputNames[0]].data;         // [1,3,512,512] in [-1,1]
+    const img = await imgGenerate(scenePrompt());
+    imggen.lastImg = img;
     const canvas = document.getElementById('sbScene');
     if (canvas) {
-      const out = new Uint8ClampedArray(W * H * 4), plane = W * H;
-      for (let i = 0; i < plane; i++) {
-        out[i * 4] = (px[i] * 0.5 + 0.5) * 255;
-        out[i * 4 + 1] = (px[plane + i] * 0.5 + 0.5) * 255;
-        out[i * 4 + 2] = (px[2 * plane + i] * 0.5 + 0.5) * 255;
-        out[i * 4 + 3] = 255;
-      }
-      canvas.width = W; canvas.height = H;
-      canvas.getContext('2d').putImageData(new ImageData(out, W, H), 0, 0);
+      canvas.width = 512; canvas.height = 512;
+      canvas.getContext('2d').putImageData(img, 0, 0);
       canvas.style.display = 'block';
+      const det = canvas.closest('details'); if (det) det.open = true;
       imgStatus('（情景 更新）');
     } else imgStatus('（キャンバス未検出）');
   } catch (e) {
@@ -603,8 +619,187 @@ async function genScene() {
   }
 }
 
+// ─── Story improv: the player takes the brush and the MAIN story continues
+// by improvisation — same dialogue box, same background, one flow. The LLM
+// narrates the next beat from the running history; the scene image repaints.
+let storyImprov = { bg: null, history: [], seeded: false, busy: false };
+
+// 史記(公有原文断片)を寄る辺に。/assets/shiji.json を一度だけ読み、場面に
+// 合う断片を選んで LLM プロンプトへ差し込み、地の文・台詞を史実へ寄せる。
+let shiji = { list: null, loading: null };
+async function loadShiji() {
+  if (shiji.list) return;
+  if (!shiji.loading) shiji.loading = fetch('/assets/shiji.json')
+    .then(r => r.json()).then(j => { shiji.list = j.fragments || []; })
+    .catch(() => { shiji.list = []; });
+  await shiji.loading;
+}
+function shijiFor(charId, text) {
+  if (!shiji.list || !shiji.list.length) return null;
+  const cand = shiji.list.filter(f => !f.chars || f.chars.indexOf(charId) >= 0);
+  const pool = cand.length ? cand : shiji.list;
+  const hit = pool.find(f => f.match && new RegExp(f.match).test(text || ''));
+  return hit || pool[Math.floor(Math.random() * pool.length)];
+}
+
+// Continue the story: given the running history + the player's action, write
+// the next narrative beat (地の文), keeping character + period voice.
+async function runBrowserStoryContinue(ctx, action) {
+  const frag = shijiFor(ctx.charId, (ctx.history || []).map(h => h.content).join(' ') + ' ' + action);
+  const beats = Math.floor(((ctx.history || []).length) / 2);   // how far in we are
+  const climax = beats >= 4;                                    // start converging on the milestone
+  const sys = 'あなたは楚漢戦争(紀元前3世紀の中国)を舞台にした対話型歴史小説の語り手。' +
+    'プレイヤーは' + (ctx.char || '主人公') + '。その行動・台詞を受け、物語を次の一段へ確かに進める。' +
+    '地の文だけでなく、その場に居る人物には「」で肉声を語らせよ(項羽は誇り高く、范増は老獪、韓信は野心的、呂雉は冷徹…性格を守れ)。' +
+    (ctx.persona ? ('関わる人物: ' + ctx.persona + '。') : '') +
+    (frag ? ('この物語はやがて史記の一場面へ向かう――「' + frag.han + '」(' + frag.gloss + ')。'
+             + (climax ? 'そろそろその核心へ雪崩れ込ませ、緊張を高めよ。' : 'そこへ緩やかに引き寄せつつ、性急にはしない。')) : '') +
+    '厳守: 日本語で2〜4文・80〜180字。情景・人物の台詞・反応を描き、次の緊張や選択の余韻で締める。' +
+    '説明・箇条書き・JSON・同じ表現の繰り返しは禁止。';
+  const msgs = [{ role: 'system', content: sys }];
+  for (const h of (ctx.history || []).slice(-8)) msgs.push(h);
+  msgs.push({ role: 'user', content: (ctx.char || '主人公') + 'は――' + action });
+  const r = await webllm.engine.chat.completions.create({ messages: msgs, temperature: 0.85, max_tokens: 260 });
+  let t = (r.choices[0].message.content || '').trim();
+  const parts = t.split(/(?<=。|」)/).filter(x => x.trim());
+  t = parts.slice(0, 4).join('').trim();
+  return (t.length > 220 ? t.slice(0, 218) + '…' : t) || '（沈黙が流れた）';
+}
+
+// Close the improvised arc with a resonant ending, weighted by 史記.
+async function runBrowserStoryEnding(ctx) {
+  const frag = shijiFor(ctx.charId, (ctx.history || []).map(h => h.content).join(' '));
+  const sys = 'あなたは楚漢戦争の講談師。これまでのアドリブ物語に、余韻ある結末を与えよ。' +
+    (ctx.char || '主人公') + 'のこの道行きがどこへ辿り着いたかを、史実の重み' +
+    (frag ? ('(「' + frag.han + '」――' + frag.gloss + ')') : '') + 'を踏まえて描く。' +
+    '大団円でも悲劇でもよい。厳守: 日本語で3〜4文・100〜200字、地の文と肉声、余韻で締める。JSON・箇条書き禁止。';
+  const msgs = [{ role: 'system', content: sys }];
+  for (const h of (ctx.history || []).slice(-8)) msgs.push(h);
+  msgs.push({ role: 'user', content: 'この物語をここで結べ。' });
+  const r = await webllm.engine.chat.completions.create({ messages: msgs, temperature: 0.9, max_tokens: 320 });
+  let t = (r.choices[0].message.content || '').trim();
+  const parts = t.split(/(?<=。|」)/).filter(x => x.trim());
+  t = parts.slice(0, 5).join('').trim();
+  return (t.length > 240 ? t.slice(0, 238) + '…' : t) || '物語は、静かに幕を下ろした。';
+}
+
+// Paint a story background from a prompt and pin it behind the scene.
+async function genStoryBg(promptText) {
+  if (!webllm && false) return;
+  if (imggen.busy) return;
+  if (!imggen.ready) { const ok = await loadImgGen(); if (!ok) return; }
+  imggen.busy = true;
+  try {
+    storyImprov.bg = await imgGenerate('sumi-e ink wash painting, ' + promptText + ', Chu-Han war era China 200 BCE, muted ink tones, atmospheric, cinematic');
+    applyStoryBg();
+  } catch (e) { /* leave the static bg */ } finally { imggen.busy = false; }
+}
+
+// Re-apply the painted background after a re-render (render() rebuilds #stage).
+function applyStoryBg() {
+  if (!storyImprov.bg) return;
+  const el = document.querySelector('.scene-bg');
+  if (!el) return;
+  const cv = document.createElement('canvas'); cv.width = 512; cv.height = 512;
+  cv.getContext('2d').putImageData(storyImprov.bg, 0, 0);
+  el.style.backgroundImage = 'url(' + cv.toDataURL('image/jpeg', 0.85) + ')';
+  el.style.backgroundSize = 'cover';
+  el.style.backgroundPosition = 'center';
+}
+
+const IMPROV_PERSONA_BY_NAME = { '妙容': 'miaorong', '蕭何': 'xiaohe', '范増': 'fanzeng', '黄石公': 'huangshi', '項伯': 'xiangbo', '蒯通': 'kuaitong' };
+const IMPROV_CHAR_NAME = { liubang: '劉邦', xiangyu: '項羽', hanxin: '韓信', zhangliang: '張良', xiaohe: '蕭何', fanzeng: '范増' };
+
+// Wired every scene render. When improv has taken over (state.improv.on), the
+// dialogue box IS the story: the player's action → LLM continues the main
+// narrative (improvBeat) → repaint the background. Same box, one flow.
+function wireStoryImprov() {
+  if (state.phase !== 'scene') return;
+  const on = state.improv && state.improv.on;
+  if (!on) { storyImprov.seeded = false; return; }
+  applyStoryBg();                                  // keep the painted bg pinned
+  if (!storyImprov.seeded) {                        // entering improv: seed history from the current line
+    storyImprov.history = [{ role: 'assistant', content: state.improv.text || '' }];
+    storyImprov.seeded = true;
+    loadShiji();                                    // pull the 史記 fragments for grounding
+  }
+  const input = document.getElementById('improvGo');
+  const go = document.getElementById('improvGoBtn');
+  const st = document.getElementById('improvStatus');
+  const step = (typeof stepAt === 'function') ? stepAt(sceneOf(state.sceneId), state.beat) : {};
+  const who = step.who || '';
+  const ctx = { char: IMPROV_CHAR_NAME[state.char] || state.char, charId: state.char, persona: NPC_PERSONA[IMPROV_PERSONA_BY_NAME[who]] || '' };
+  // ▣ 物語を結ぶ: give the improvised arc a payoff (a coherent ending beat).
+  const fin = document.getElementById('improvFinish');
+  if (fin && !fin.dataset.wired) {
+    fin.dataset.wired = '1';
+    fin.addEventListener('click', async () => {
+      if (storyImprov.busy) return;
+      if (!webllm.ready && navigator.gpu) { if (st) st.textContent = 'AI 読み込み中…'; await loadBrowserAI(); }
+      if (!webllm.ready) { if (st) st.textContent = 'AI 起動が必要（WebGPU）'; return; }
+      storyImprov.busy = true;
+      if (st) st.textContent = '……物語が結ばれる';
+      try {
+        ctx.history = storyImprov.history;
+        const end = await runBrowserStoryEnding(ctx);
+        storyImprov.history.push({ role: 'assistant', content: end });
+        state = update({ tag: 'improvBeat', text: '― 結 ―\n' + end }, state);
+        persist(state); render();
+        const bgp = (typeof sbSceneEn === 'function') ? sbSceneEn(end) : 'an epic finale, ink wash';
+        genStoryBg(bgp).then(() => render());
+      } catch (e) { if (st) st.textContent = '（結末生成に失敗）'; }
+      storyImprov.busy = false;
+    });
+  }
+  if (!input || !go || go.dataset.wired) return;
+  go.dataset.wired = '1';
+  const step2 = async () => {
+    const text = input.value.trim();
+    if (!text || storyImprov.busy) return;
+    input.value = '';
+    if (!webllm.ready && navigator.gpu) { if (st) st.textContent = 'AI 読み込み中…'; await loadBrowserAI(); }
+    if (!webllm.ready) { if (st) st.textContent = 'AI 起動が必要（WebGPU）'; return; }
+    storyImprov.busy = true;
+    if (st) st.textContent = '……物語が動く';
+    try {
+      ctx.history = storyImprov.history;
+      const beat = await runBrowserStoryContinue(ctx, text);
+      storyImprov.history.push({ role: 'user', content: text });
+      storyImprov.history.push({ role: 'assistant', content: beat });
+      state = update({ tag: 'improvBeat', text: beat }, state);  // the new beat IS the story now
+      persist(state); render();
+      const bgp = (typeof sbSceneEn === 'function') ? sbSceneEn(beat + ' ' + text) : 'an ancient Chinese scene, banners';
+      genStoryBg(bgp).then(() => render());
+    } catch (e) { if (st) st.textContent = '（応答に失敗）'; }
+    storyImprov.busy = false;
+  };
+  go.addEventListener('click', step2);
+  input.addEventListener('keydown', (e) => { if (e.isComposing) return; if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); step2(); } });
+}
+
+// render() rebuilds #stage, so the freshly-created #sbScene canvas is blank
+// after every game action — re-draw the last generated image so there's no
+// blank gap while a fresh scene image is (re)painting.
+function restoreScene() {
+  if (!imggen.lastImg) return;
+  const cv = document.getElementById('sbScene');
+  if (!cv) return;
+  cv.width = imggen.lastImg.width; cv.height = imggen.lastImg.height;
+  cv.getContext('2d').putImageData(imggen.lastImg, 0, 0);
+  cv.style.display = 'block';
+  const det = cv.closest('details'); if (det) det.open = true;
+}
+
+// The illustration should follow the story: when the scene advances, repaint
+// it to match — in the background, and only once the painter is loaded (the
+// player opted in by generating at least once). This is the TRPG beat.
+function refreshScene() {
+  if (imggen.ready && !imggen.busy) genScene();   // fire-and-forget; genScene reads the new world
+}
+
 function wireImgGen() {
   const b = document.getElementById('imgGen');
+  restoreScene();                       // re-apply the last scene after a re-render
   if (!b || b.dataset.wired) return;
   b.dataset.wired = '1';
   b.addEventListener('click', genScene);
@@ -1021,12 +1216,26 @@ function wireSandboxSim() {
 // then cached in the browser. Swap here for a 7B if you want more.
 const WEBLLM_MODEL = 'Qwen2.5-3B-Instruct-q4f16_1-MLC';
 const GM_SYSTEM =
-  'あなたは紀元前206年、楚漢戦争サンドボックスのゲームマスター。プレイヤーの自由な行動を読み、' +
-  '世界の反応を即興で描き、盤面の変化を返す。人物の性格（項羽=誇り高い武人、韓信=野心家、' +
-  '呂雉=冷徹、范増=老獪）と勢力の力関係に照らし、笑い・葛藤・驚き、時にどんでん返しを混ぜる。\n' +
+  'あなたは紀元前206年、楚漢戦争サンドボックスの冷徹なゲームマスター。プレイヤーの自由な行動に、' +
+  '世界がどう応じるかを劇的かつ非情に裁く。人物の性格（項羽=誇り高い武人、韓信=野心家、' +
+  '呂雉=冷徹、范増=老獪）と力関係、そして【差し迫る事態】に照らして結果を描け。' +
+  '行動がその危機に触れるなら和らげる/悪化させるかを明示し、触れないなら危機が刻々と迫ると匂わせよ。' +
+  '成功にも失敗にも代償を伴わせ、緊張を絶やすな。\n' +
+  '重要: 行動が功臣を宥める/褒賞/領地→その功臣の忠誠を上げよ(loyalty +)。冷遇/疑う/兵を削ぐ→下げよ(-)。' +
+  '兵糧を確保/略奪→supply +、浪費/長征→-。行動に応じて必ず action を返し、盤面と危機を実際に動かせ。\n' +
   '地域ID: guanzhong xianyang hanzhong bashu pengcheng wei zhao qi / 勢力ID: han chu qin lords\n' +
   '返答は必ず次のJSON1行のみ（前後に何も付けない）:\n' +
-  '{"narration":"日本語60-160字","deltas":[{"region":"地域ID","dCtrl":-25〜25の整数,"owner":"勢力ID(領有が変わる時だけ)"}]}';
+  '{"narration":"日本語60-160字。結果を描き、最後に次の緊張を一言",' +
+  '"deltas":[{"region":"地域ID","dCtrl":-25〜25の整数,"owner":"勢力ID(領有が変わる時だけ)"}],' +
+  '"action": null または {"type":"loyalty","who":"功臣名","d":-30〜30} / {"type":"supply","d":-30〜30} / {"type":"expedition","target":"地名"} / {"type":"rebellion","who":"功臣名"}}';
+
+// Proactive scene narrator: given the board + recent events + the looming
+// threat, paints the moment and ends on "どうする?" — turns 季を進める into
+// an LLM-authored event beat (情景描写) instead of a flat table line.
+const GM_SCENE_SYSTEM =
+  'あなたは楚漢戦争の講談師。今の盤面と差し迫る事態から、情景を簡潔に描く。' +
+  '厳守: 日本語で1〜2文・合計80字以内。難語・外国語・過剰な比喩を避け、平易に。' +
+  '最後は必ず「――さあ、どうする？」で締める。説明・箇条書き・JSON・繰り返しは禁止。';
 
 let webllm = { engine: null, mod: null, ready: false, loading: false };
 
@@ -1089,6 +1298,93 @@ async function runBrowserGM(action, world) {
   const j = JSON.parse(raw);   // throws → caller falls back
   return { narration: j.narration || '（天は沈黙している）', deltas: Array.isArray(j.deltas) ? j.deltas : [],
            action: j.action || null };
+}
+
+// Proactive event beat: after the mechanical tick, let the LLM narrate the
+// new situation (weaving the last log lines + the looming threat) and end on
+// "どうする?" — plain prose, no JSON to parse. Returns '' on any failure.
+async function runBrowserGMScene(world, boardSnap) {
+  const recent = (world.log || []).slice(-3).join(' / ');
+  const t = world.court && world.court.threat;
+  const threatLine = t ? ('\n【差し迫る事態】' + t.label + '（猶予' + t.turnsLeft + 'ターン）') : '';
+  try {
+    const r = await webllm.engine.chat.completions.create({
+      messages: [
+        { role: 'system', content: GM_SCENE_SYSTEM },
+        { role: 'user', content: '【盤面】\n' + (boardSnap || '') + '\n【直近の動き】\n' + recent + threatLine + '\n\nこの局面の情景を描け。' }
+      ],
+      temperature: 0.6, max_tokens: 130
+    });
+    return trimScene(r.choices[0].message.content || '');
+  } catch (e) { return ''; }
+}
+
+// The 3B model tends to ramble; clamp to ~2 sentences and guarantee the
+// "どうする?" hook so the beat stays a tight prompt-for-improvisation.
+function trimScene(s) {
+  let t = (s || '').trim();
+  const cut = t.indexOf('さあ、どうする');
+  if (cut >= 0) t = t.slice(0, cut).trim();       // drop anything after the hook
+  const parts = t.split(/(?<=。)/).filter(x => x.trim());
+  t = parts.slice(0, 2).join('').trim();
+  if (t.length > 110) t = t.slice(0, 108) + '…';
+  return t + '　――さあ、どうする？';
+}
+
+// Compact world summary fed to the GM (board + date + supply/fame + threat).
+function sbSnapshot() {
+  const w = state.world;
+  if (!w) return '';
+  const c = w.court || {}, t = c.threat;
+  const roster = (c.retainers || []).filter(r => r.alive)
+    .map(r => r.name + '(忠' + r.loyalty + '/兵' + r.troops + ')').join(' ');
+  return w.regions.map(r => r.id + '(' + r.ja + '):' + r.owner + ' ' + r.ctrl + '%').join(', ')
+    + ' / BCE ' + w.year + ' ' + '春夏秋冬'[w.season]
+    + ' / 兵糧' + c.supply + ' 名声' + c.fame
+    + ' / 功臣: ' + roster
+    + (t ? (' / ⚠差し迫る事態:' + t.label + '(猶予' + t.turnsLeft + ')') : '');
+}
+
+// Deterministic fallback: infer a structured action from the player's free
+// text (retainer names + placate/punish/supply verbs). The 3B model rarely
+// emits the `action` field reliably, so this guarantees an improvised move
+// actually moves the crisis. Mirrors sbExpeditionIntent's keyword approach.
+function inferGmAction(text) {
+  const w = state.world;
+  if (!w || !w.court) return null;
+  // Build a monument → leave a mark on the world map (the "ピラミッドをつくる" beat).
+  const bm = text.match(/(ピラミッド|万里の長城|長城|宮殿|城郭|城|要塞|大仏|寺院|寺|廟|港|運河|大運河|塔|灯台|陵|霊廟|新都|都)/);
+  if (bm && /(築|建て|建設|造|作|興|据|営|普請)/.test(text)) {
+    const icons = { 'ピラミッド':'▲','万里の長城':'🧱','長城':'🧱','宮殿':'🏯','城郭':'🏯','城':'🏯','要塞':'🏯','大仏':'🗿','寺院':'⛩','寺':'⛩','廟':'⛩','霊廟':'⛩','港':'⚓','運河':'🌊','大運河':'🌊','塔':'🗼','灯台':'🗼','陵':'⛰','新都':'🏙','都':'🏙' };
+    const ja = bm[1];
+    const fid = (typeof sbFrontierNamed === 'function') ? sbFrontierNamed(text) : '';
+    const reg = (w.regions || []).find(r => text.includes(r.ja));
+    const target = fid || (reg ? reg.id : w.loc);
+    return { type: 'landmark', ja: ja, icon: icons[ja] || '◆', target: target };
+  }
+  const rs = (w.court.retainers || []).filter(r => r.alive);
+  const who = rs.map(r => r.name).find(n => text.includes(n)) || '';
+  const punish  = /(疑|削ぐ|兵を奪|奪っ|罷免|抑え|冷遇|警戒|遠ざけ|粛清|処断|誅|斬|殺)/.test(text);
+  const placate = /(褒賞|恩賞|領地|封じ|封ずる|厚遇|繋ぎ|宥|懐柔|報い|与え|任じ|重用|信頼|慰労|労い|盟)/.test(text);
+  if (who && punish)  return { type: 'loyalty', who: who, d: -25 };
+  if (who && placate) return { type: 'loyalty', who: who, d: 30 };
+  if (/(浪費|散財|放蕩|蕩尽)/.test(text)) return { type: 'supply', d: -20 };
+  if (/(兵糧|兵站|糧秣|糧食|補給|徴発|屯田|略奪|蓄え|兵を養|備蓄)/.test(text)) return { type: 'supply', d: 20 };
+  return null;
+}
+
+// 季を進める with an LLM event beat: run the mechanical tick (threat
+// countdown + table event), then — if the browser AI is loaded — let the
+// GM narrate the new 情景 and prompt the player's next move.
+async function advanceWithGM() {
+  state = update({ tag: 'sbAdvance' }, state);   // mechanical tick
+  persist(state); render();
+  if (!webllm.ready || !state.world) return;
+  gmAiStatus('……講談師が筆を執っている');
+  const narr = await runBrowserGMScene(state.world, sbSnapshot());
+  if (narr) { state = update({ tag: 'gmResult', narration: narr, deltas: [], action: null }, state); persist(state); render(); }
+  gmAiStatus('AI 軍師 起動済み（行動を書けば即興で応答）');
+  refreshScene();   // repaint the illustration to match the new scene
 }
 
 // Short personas so the small model actually stays in character.
@@ -1252,12 +1548,7 @@ function wireGmHandlers() {
   if (!send || !input) return;
   if (send.dataset.wired) return;
   send.dataset.wired = '1';
-  const snapshot = () => {
-    const w = state.world;
-    if (!w) return '';
-    return w.regions.map(r => r.id + '(' + r.ja + '):' + r.owner + ' ' + r.ctrl + '%').join(', ')
-      + ' / BCE ' + w.year + ' ' + '春夏秋冬'[w.season];
-  };
+  const snapshot = sbSnapshot;
   const doSend = async () => {
     const text = input.value.trim();
     if (!text || (state.world && state.world.pending === 1)) return;
@@ -1269,6 +1560,7 @@ function wireGmHandlers() {
       state = update({tag: 'gmSubmit', text: text}, state);       // echo ▶ 劉邦: …
       state = update({tag: 'expedition', target: expTarget}, state);  // 兵站モデル起動
       persist(state); render();
+      refreshScene();   // the frontier expedition is a whole new scene — repaint
       return;
     }
     input.value = '';
@@ -1280,7 +1572,7 @@ function wireGmHandlers() {
     if (webllm.ready) {
       try {
         const r = await runBrowserGM(text, world);
-        state = update({tag: 'gmResult', narration: r.narration, deltas: r.deltas, action: r.action || null}, state);
+        state = update({tag: 'gmResult', narration: r.narration, deltas: r.deltas, action: r.action || inferGmAction(text)}, state);
         done = true;
       } catch (e) { /* fall through to server */ }
     }
@@ -1293,12 +1585,13 @@ function wireGmHandlers() {
         });
         const j = await res.json();
         if (j.error) state = update({tag: 'gmError', text: ''}, state);
-        else state = update({tag: 'gmResult', narration: j.narration || '（天は沈黙している）', deltas: j.deltas || [], action: j.action || null}, state);
+        else state = update({tag: 'gmResult', narration: j.narration || '（天は沈黙している）', deltas: j.deltas || [], action: j.action || inferGmAction(text)}, state);
         done = true;
       } catch (e) { /* 3) offline fallback */ }
     }
     if (!done) state = update({tag: 'gmError', text: ''}, state);
     persist(state); render();
+    refreshScene();   // repaint to match what just unfolded
   };
   send.addEventListener('click', doSend);
   input.addEventListener('keydown', (e) => {
@@ -1489,6 +1782,7 @@ stage.addEventListener('click', (e) => {
       if (msg.tag === 'applySaveCode') { sfxForButton(t); applySaveCodeFromInput(); return; }
       if (msg.tag === 'openLeaderboard') { sfxForButton(t); openLeaderboard(); return; }
       if (msg.tag === 'concludeChat') { sfxForButton(t); concludeChat(); return; }
+      if (msg.tag === 'sbAdvance') { sfxForButton(t); advanceWithGM(); return; }
       const prevPhase = state.phase;
       sfxForButton(t);
       state = update(msg, state);

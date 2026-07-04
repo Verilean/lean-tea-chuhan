@@ -11,16 +11,17 @@
 
 extern js "(n) => String(n)" numStr
 
--- 楚漢の主要地域。x/y は 0..100 のマップ座標。
+-- 楚漢の主要地域。x/y はユーラシア世界図(0..160 × 0..90)上の座標で、
+-- 中国は中央〜東寄りに固まる。周りに遠征先(sbFrontiers)が広がる。
 def sbRegions := [
-  {id: "guanzhong", ja: "關中", x: 34, y: 42, owner: "qin",   ctrl: 60},
-  {id: "xianyang",  ja: "咸陽", x: 40, y: 36, owner: "qin",   ctrl: 50},
-  {id: "hanzhong",  ja: "漢中", x: 30, y: 56, owner: "han",   ctrl: 82},
-  {id: "bashu",     ja: "巴蜀", x: 20, y: 70, owner: "han",   ctrl: 55},
-  {id: "pengcheng", ja: "彭城", x: 66, y: 48, owner: "chu",   ctrl: 85},
-  {id: "wei",       ja: "魏",   x: 54, y: 42, owner: "lords", ctrl: 50},
-  {id: "zhao",      ja: "趙",   x: 60, y: 26, owner: "lords", ctrl: 55},
-  {id: "qi",        ja: "齊",   x: 80, y: 34, owner: "lords", ctrl: 60}
+  {id: "guanzhong", ja: "關中", x: 100, y: 46, owner: "qin",   ctrl: 60},
+  {id: "xianyang",  ja: "咸陽", x: 106, y: 41, owner: "qin",   ctrl: 50},
+  {id: "hanzhong",  ja: "漢中", x: 97,  y: 54, owner: "han",   ctrl: 82},
+  {id: "bashu",     ja: "巴蜀", x: 90,  y: 61, owner: "han",   ctrl: 55},
+  {id: "pengcheng", ja: "彭城", x: 121, y: 48, owner: "chu",   ctrl: 85},
+  {id: "wei",       ja: "魏",   x: 112, y: 44, owner: "lords", ctrl: 50},
+  {id: "zhao",      ja: "趙",   x: 114, y: 34, owner: "lords", ctrl: 55},
+  {id: "qi",        ja: "齊",   x: 129, y: 40, owner: "lords", ctrl: 60}
 ]
 
 def sbColor(owner) :=
@@ -99,8 +100,18 @@ def sbSceneEn(last) :=
   else if reTest(last, "呂雉|書") == 1 then "a cold empress reading a letter by candlelight"
   else "an ancient Chinese war camp, banners"
 
+-- 今この場面の"主役"を英語で。差し迫る事態があればそれを優先、
+-- 無ければ直近ログから情景を拾う。→ シーンが進むたび絵が場面に即す。
+def sbSceneSubject(world) :=
+  let c := world.court;
+  if c.threat != null then
+    (if c.threat.kind == "retainer" then "a powerful general brooding alone in a war tent, plotting rebellion, tense"
+     else if c.threat.kind == "supply" then "starving soldiers beside empty grain carts, gaunt faces, desperation"
+     else "enemy armies massing on the frontier at dusk, war banners, dread")
+  else sbSceneEn(sbLastLog(world))
+
 def sbScenePrompt(world) :=
-  let scene := sbSceneEn(sbLastLog(world));
+  let scene := sbSceneSubject(world);
   let season := sbSeasonEn(world.season);
   sconcat("sumi-e ink wash painting, ",
   sconcat(scene,
@@ -237,10 +248,12 @@ def drawBattle(ctx, w, h, b) := do
 -- ── 一兵士アクション: シミュレーション + 描画(ロジックは LeanJs、
 -- rAF・キー入力・overlay は runtime.js が持つ)──────────────────────
 
--- 初期状態(canvas 中央、HP100、討取目標15)。
-def actionInitState(w, h) :=
-  {px: w / 2, py: h / 2, hp: 100, fx: 1, fy: 0, cd: 0, slash: 0,
-   enemies: [], kills: 0, target: 15, spawnT: 0, over: false, win: false}
+-- 初期状態: 1対1の対戦格闘。自軍将 pn(左) × 敵将 en(右)、各 HP100。
+def actionInitState(w, h, pn, en) :=
+  {ground: h - 66, pName: pn, eName: en,
+   p: {x: w * 0.28, hp: 100, atk: 0, cd: 0, guard: false, stun: 0, face: 1, hurt: 0},
+   e: {x: w * 0.72, hp: 100, atk: 0, cd: 0, guard: false, stun: 0, face: 0 - 1, hurt: 0, ai: 20, act: 0},
+   over: false, win: false}
 
 -- 画面端のランダムな位置に敵を1体生成。
 def actionSpawnEnemy(w, h) :=
@@ -254,93 +267,133 @@ def actionSpawnEnemy(w, h) :=
            else mathRandom() * h;
   {x: x, y: y, hp: 2, hit: 0}
 
--- 1フレーム分の状態遷移。keys は runtime.js の action.keys。
+-- 1フレーム分の状態遷移(1対1格闘)。keys は runtime.js の action.keys。
+-- 攻撃は atk タイマーで表現し、atk==12 の1フレームだけを命中判定に使う
+-- (多段ヒット防止)。ガード中は移動・攻撃不可、被弾でスタン+ノックバック。
 def actionStep(st, keys, w, h) :=
   if st.over then st
   else do
-    let mx := (if keyDown(keys, "d") == 1 || keyDown(keys, "arrowright") == 1 then 1 else 0)
-            - (if keyDown(keys, "a") == 1 || keyDown(keys, "arrowleft") == 1 then 1 else 0);
-    let my := (if keyDown(keys, "s") == 1 || keyDown(keys, "arrowdown") == 1 then 1 else 0)
-            - (if keyDown(keys, "w") == 1 || keyDown(keys, "arrowup") == 1 then 1 else 0);
-    let moving := mx != 0 || my != 0;
-    let ml := if moving then mathHypot(mx, my) else 1;
-    let fx := if moving then mx / ml else st.fx;
-    let fy := if moving then my / ml else st.fy;
-    let px := mathMax(10, mathMin(w - 10, if moving then st.px + mx / ml * 3.4 else st.px));
-    let py := mathMax(10, mathMin(h - 10, if moving then st.py + my / ml * 3.4 else st.py));
-    let cdDec := if st.cd > 0 then st.cd - 1 else 0;
-    let slashDec := if st.slash > 0 then st.slash - 1 else 0;
-    let ne := arrLen(st.enemies);
-    let canSpawn := ne < 8 && (st.kills + ne) < st.target + 6;
-    let spawnTa := if canSpawn then st.spawnT - 1 else st.spawnT;
-    let doSpawn := canSpawn && spawnTa <= 0;
-    let spawnT := if doSpawn then 26 else spawnTa;
-    let baseEnemies := if doSpawn then arrPush(st.enemies, actionSpawnEnemy(w, h)) else st.enemies;
-    -- 敵AI(player を追う)+ 接触ダメージ
-    let mut hp := st.hp;
-    let mut moved := [];
-    for e in baseEnemies do (
-      let dx := px - e.x;
-      let dy := py - e.y;
-      let dRaw := mathHypot(dx, dy);
-      let d := if dRaw == 0 then 1 else dRaw;
-      let e2hit := if e.hit > 0 then e.hit - 1 else 0;
-      let hurt := d < 14 && e2hit == 0;
-      hp := if hurt then hp - 6 else hp;
-      moved := arrPush(moved, {x: e.x + dx / d * 1.5, y: e.y + dy / d * 1.5,
-                               hp: e.hp, hit: if hurt then 30 else e2hit})
-    );
-    -- 斬撃(J / Space、クールダウン0のとき)
-    let slashing := (keyDown(keys, "j") == 1 || keyDown(keys, " ") == 1) && cdDec == 0;
-    let cd := if slashing then 16 else cdDec;
-    let slashTimer := if slashing then 8 else slashDec;
-    let ax := px + fx * 22;
-    let ay := py + fy * 22;
-    let mut slashed := [];
-    for e in moved do (
-      let hitBySlash := slashing && mathHypot(e.x - ax, e.y - ay) < 26;
-      slashed := arrPush(slashed, {x: e.x, y: e.y,
-                                   hp: if hitBySlash then e.hp - 1 else e.hp,
-                                   hit: if hitBySlash then 8 else e.hit})
-    );
-    -- 討取(HP0以下)を除いて数える
-    let mut kills := st.kills;
-    let mut live := [];
-    for e in slashed do (
-      let alive := e.hp > 0;
-      kills := if alive then kills else kills + 1;
-      live := if alive then arrPush(live, e) else live
-    );
-    let win := kills >= st.target;
-    let dead := hp <= 0;
-    {px: px, py: py, hp: if dead then 0 else hp, fx: fx, fy: fy,
-     cd: cd, slash: slashTimer, enemies: live, kills: kills,
-     target: st.target, spawnT: spawnT, over: win || dead, win: win}
+    let reach := 60;
+    let spd := 3.6;
+    let p := st.p;
+    let e := st.e;
+    let dist := if e.x > p.x then e.x - p.x else p.x - e.x;
+    let pFace := if e.x > p.x then 1 else 0 - 1;
+    let eFace := if p.x > e.x then 1 else 0 - 1;
+    -- ── 自機入力 ──
+    let kL := keyDown(keys, "a") == 1 || keyDown(keys, "arrowleft") == 1;
+    let kR := keyDown(keys, "d") == 1 || keyDown(keys, "arrowright") == 1;
+    let pGuard := keyDown(keys, "k") == 1 || keyDown(keys, "s") == 1 || keyDown(keys, "arrowdown") == 1;
+    let pAtkKey := keyDown(keys, "j") == 1 || keyDown(keys, " ") == 1;
+    let pBusy := p.stun > 0 || p.atk > 0;
+    let pmx := if pBusy || pGuard then 0 else (if kR then 1 else 0) - (if kL then 1 else 0);
+    let pKnock := if p.stun > 0 then (0 - pFace) * 2 else 0;
+    let px := mathMax(36, mathMin(w - 36, p.x + pmx * spd + pKnock));
+    let pWantAtk := pAtkKey && p.cd == 0 && p.stun == 0 && (pGuard == false) && (p.atk == 0);
+    let pAtk := if pWantAtk then 16 else (if p.atk > 0 then p.atk - 1 else 0);
+    let pCd := if pWantAtk then 26 else (if p.cd > 0 then p.cd - 1 else 0);
+    -- ── 敵AI: ai タイマーで意思決定を保持(接近0/攻撃1/ガード2)──
+    let reDecide := e.ai <= 0 && e.stun <= 0 && e.atk <= 0;
+    let roll := mathFloor(mathRandom() * 100);
+    let newAct := if dist > reach then 0
+                  else if roll < 46 then 1
+                  else if roll < 74 then 2
+                  else 0;
+    let act := if reDecide then newAct else e.act;
+    let eGuard := act == 2 && e.stun <= 0 && e.atk <= 0;
+    let eMove := if (e.stun > 0) || (e.atk > 0) || eGuard then 0 else (if act == 0 then eFace else 0);
+    let eKnock := if e.stun > 0 then (0 - eFace) * 2 else 0;
+    let ex := mathMax(36, mathMin(w - 36, e.x + eMove * (spd - 1.3) + eKnock));
+    let eWantAtk := act == 1 && e.stun <= 0 && e.atk == 0 && e.cd == 0 && dist < reach + 6;
+    let eAtk := if eWantAtk then 16 else (if e.atk > 0 then e.atk - 1 else 0);
+    let eCd := if eWantAtk then 30 else (if e.cd > 0 then e.cd - 1 else 0);
+    let aiNext := if reDecide then (if act == 1 then 18 else if act == 2 then 24 else 14)
+                  else (if e.ai > 0 then e.ai - 1 else 0);
+    -- ── 命中判定(atk==12 の瞬間・射程内)──
+    let pHits := pAtk == 12 && dist <= reach;
+    let eHits := eAtk == 12 && dist <= reach;
+    let eDmg := if pHits then (if eGuard then 2 else 12) else 0;
+    let pDmg := if eHits then (if pGuard then 2 else 12) else 0;
+    let eStun := if pHits && (eGuard == false) then 20 else (if e.stun > 0 then e.stun - 1 else 0);
+    let pStun := if eHits && (pGuard == false) then 20 else (if p.stun > 0 then p.stun - 1 else 0);
+    let eHp := mathMax(0, e.hp - eDmg);
+    let pHp := mathMax(0, p.hp - pDmg);
+    let pHurt := if pDmg > 0 then 8 else (if p.hurt > 0 then p.hurt - 1 else 0);
+    let eHurt := if eDmg > 0 then 8 else (if e.hurt > 0 then e.hurt - 1 else 0);
+    let pWin := eHp <= 0;
+    let pLose := pHp <= 0;
+    {ground: st.ground, pName: st.pName, eName: st.eName,
+     p: {x: px, hp: pHp, atk: pAtk, cd: pCd, guard: pGuard, stun: pStun, face: pFace, hurt: pHurt},
+     e: {x: ex, hp: eHp, atk: eAtk, cd: eCd, guard: eGuard, stun: eStun, face: eFace, hurt: eHurt, ai: aiNext, act: act},
+     over: pWin || pLose, win: pWin}
 
--- アクション画面の描画(敵・斬撃弧・自機)。HUD は runtime.js。
+-- 力士1体を棒人間で描く。攻撃中は前方へ武器を突き出し、ガードで盾弧。
+def figDraw(ctx, f, color, groundY) := do
+  let x := f.x;
+  let y := groundY;
+  let striking := f.atk <= 14 && f.atk >= 6;
+  let _ := ctxGlobalAlpha(ctx, if f.hurt > 0 then 0.55 else 1);
+  let _ := ctxSetStroke(ctx, color);
+  let _ := ctxSetLineWidth(ctx, 4);
+  -- 脚
+  let _ := ctxBeginPath(ctx);
+  let _ := ctxMoveTo(ctx, x, y - 28);
+  let _ := ctxLineTo(ctx, x - 9, y);
+  let _ := ctxMoveTo(ctx, x, y - 28);
+  let _ := ctxLineTo(ctx, x + 9, y);
+  -- 胴
+  let _ := ctxMoveTo(ctx, x, y - 28);
+  let _ := ctxLineTo(ctx, x, y - 60);
+  let _ := ctxStroke(ctx);
+  -- 頭
+  let _ := ctxSetFill(ctx, color);
+  let _ := ctxBeginPath(ctx);
+  let _ := ctxArc(ctx, x, y - 69, 9, 0, 6.29);
+  let _ := ctxFill(ctx);
+  -- 腕/武器
+  let ext := if striking then 44 else 15;
+  let _ := ctxSetStroke(ctx, if striking then "#ffd54a" else color);
+  let _ := ctxSetLineWidth(ctx, if striking then 5 else 3);
+  let _ := ctxBeginPath(ctx);
+  let _ := ctxMoveTo(ctx, x, y - 52);
+  let _ := ctxLineTo(ctx, x + f.face * ext, y - 52 - (if striking then 4 else 8));
+  let _ := ctxStroke(ctx);
+  -- ガード(盾)
+  let _ := if f.guard then (
+    let _ := ctxSetStroke(ctx, "#9fc4ff");
+    let _ := ctxSetLineWidth(ctx, 3);
+    let _ := ctxBeginPath(ctx);
+    let _ := ctxMoveTo(ctx, x + f.face * 14, y - 62);
+    let _ := ctxLineTo(ctx, x + f.face * 14, y - 34);
+    ctxStroke(ctx)
+  ) else null;
+  ctxGlobalAlpha(ctx, 1)
+
+-- アクション画面の描画(HPバー・地面・両力士)。HUD は runtime.js。
 def actionDraw(ctx, st, w, h) := do
   let _ := ctxSetFill(ctx, "#14110c");
   let _ := ctxFillRect(ctx, 0, 0, w, h);
-  let _ := ctxSetFill(ctx, "#ff5a4d");
-  for e in st.enemies do (
-    let _ := ctxGlobalAlpha(ctx, if e.hit > 0 then 0.6 else 1);
-    let _ := ctxBeginPath(ctx);
-    let _ := ctxArc(ctx, e.x, e.y, 6, 0, 6.29);
-    ctxFill(ctx)
-  );
-  let _ := ctxGlobalAlpha(ctx, 1);
-  let _ := if st.slash > 0 then (
-    let _ := ctxSetStroke(ctx, "#ffd54a");
-    let _ := ctxSetLineWidth(ctx, 3);
-    let _ := ctxBeginPath(ctx);
-    let a := mathAtan2(st.fy, st.fx);
-    let _ := ctxArc(ctx, st.px, st.py, 24, a - 0.7, a + 0.7);
-    ctxStroke(ctx)
-  ) else null;
+  let _ := ctxSetFill(ctx, "#241d13");
+  let _ := ctxFillRect(ctx, 0, st.ground, w, h - st.ground);
+  -- HP バー
+  let _ := ctxSetFill(ctx, "#3a2a2a");
+  let _ := ctxFillRect(ctx, 20, 18, 300, 15);
+  let _ := ctxFillRect(ctx, w - 320, 18, 300, 15);
   let _ := ctxSetFill(ctx, "#4d8cff");
-  let _ := ctxBeginPath(ctx);
-  let _ := ctxArc(ctx, st.px, st.py, 8, 0, 6.29);
-  ctxFill(ctx)
+  let _ := ctxFillRect(ctx, 20, 18, 300 * st.p.hp / 100, 15);
+  let _ := ctxSetFill(ctx, "#ff5a4d");
+  let _ := ctxFillRect(ctx, w - 20 - 300 * st.e.hp / 100, 18, 300 * st.e.hp / 100, 15);
+  -- 名前
+  let _ := ctxSetFill(ctx, "#f0e6d2");
+  let _ := ctxSetFont(ctx, "14px serif");
+  let _ := ctxSetTextAlign(ctx, "left");
+  let _ := ctxFillText(ctx, st.pName, 20, 48);
+  let _ := ctxSetTextAlign(ctx, "right");
+  let _ := ctxFillText(ctx, st.eName, w - 20, 48);
+  let _ := ctxSetTextAlign(ctx, "left");
+  -- 両力士
+  let _ := figDraw(ctx, st.p, "#6fa8ff", st.ground);
+  figDraw(ctx, st.e, "#ff7a6a", st.ground)
 
 -- ── 群衆シミュ(わさわさ)の編成管理 + 毎フレーム移動 ────────────
 -- 名のある将(勢力ごと1体、実際に領地を持つ勢力にだけ出る)。
@@ -448,12 +501,12 @@ def initRetainers(anchor) :=
 -- (court は world を貫通するので、遠征の状態もここに載せて再スレッドを避ける)
 def initCourt(anchor) :=
   {retainers: initRetainers(anchor), drama: null, purges: 0,
-   supply: 60, fame: 0, doom: null}
+   supply: 60, fame: 0, doom: null, threat: null, landmarks: []}
 
 -- court の兵糧を d だけ増減(0 未満にはしない)。
 def sbCourtGainSupply(c, d) :=
   {retainers: c.retainers, drama: c.drama, purges: c.purges,
-   supply: maxI(0, c.supply + d), fame: c.fame, doom: c.doom}
+   supply: maxI(0, c.supply + d), fame: c.fame, doom: c.doom, threat: c.threat, landmarks: c.landmarks}
 
 -- 最も"危うい"功臣の index(野心+兵力-忠誠 が最大)。無ければ -1。
 def sbDangerIdx(rs, i, bestScore, bestI) :=
@@ -487,7 +540,7 @@ def sbCourtTick(court, world) :=
                     else (r.ambition + r.troops - r.loyalty) > 55 && (rngInt() % 3 == 0);
         if fire
         then {retainers: rs, drama: {who: r.name, idx: di, kind: kind}, purges: court.purges,
-              supply: court.supply, fame: court.fame, doom: court.doom}
+              supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat, landmarks: court.landmarks}
         else court))
 
 -- 全存命将の忠誠を d だけ動かす(粛清の連鎖=兎死狗烹に使う)。
@@ -516,19 +569,19 @@ def sbResolveRebellion(world, choice) :=
          arrPush(world.log, sconcat("⚔ 迎え撃った。", sconcat(r.name, "を討ち取り、乱を鎮めた。だが残る将の背にも、冷たいものが走る。"))),
          0, world.who,
          {retainers: sbLoyaltyAll(arrSet(rs, idx, {name: r.name, loyalty: 0, ambition: 0, troops: 0, alive: false}), 0 - 8),
-          drama: null, purges: court.purges, supply: court.supply, fame: court.fame + 40, doom: court.doom})
+          drama: null, purges: court.purges, supply: court.supply, fame: court.fame + 40, doom: court.doom, threat: court.threat, landmarks: court.landmarks})
      else
        sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
          arrPush(world.log, sconcat("⚔ ", sconcat(r.name, "の反乱軍に敗れた。天下を共に取った刃が、いま己を貫く。"))),
          0, world.who,
-         {retainers: rs, drama: null, purges: court.purges, supply: court.supply, fame: court.fame, doom: "revolt"}))
+         {retainers: rs, drama: null, purges: court.purges, supply: court.supply, fame: court.fame, doom: "revolt", threat: court.threat, landmarks: court.landmarks}))
   else
     (let r2 := {name: r.name, loyalty: 55, ambition: r.ambition, troops: r.troops, alive: true};
      let regions2 := sbAdj(world.regions, sbTopIdxOf(world.regions, pf, 0, -1, 0), 0 - 12);
      sbWorld(world.mode, world.year, world.season, world.loc, regions2,
        arrPush(world.log, sconcat("頭を垂れ、", sconcat(r.name, "の望みを容れた。乱は収まったが、主従は静かに逆しまになりつつある。"))),
        0, world.who,
-       {retainers: arrSet(rs, idx, r2), drama: null, purges: court.purges, supply: court.supply, fame: court.fame, doom: court.doom}))
+       {retainers: arrSet(rs, idx, r2), drama: null, purges: court.purges, supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat, landmarks: court.landmarks}))
 
 def sbResolveDrama(world, choice) :=
   let court := world.court;
@@ -559,7 +612,7 @@ def sbResolveDrama(world, choice) :=
      else sconcat(r.name, sconcat("を焚きつけ、", sconcat(arrGet(world.regions, ei).ja, "へ差し向けた。野心が外へ向いた――今のところは。")));
    sbWorld(world.mode, world.year, world.season, world.loc, regions2,
      arrPush(world.log, line), 0, world.who,
-     {retainers: rs2, drama: null, purges: purges2, supply: court.supply, fame: court.fame, doom: court.doom}))
+     {retainers: rs2, drama: null, purges: purges2, supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat, landmarks: court.landmarks}))
 
 -- 存命で忠誠0以下・兵力40以上の将が居れば公然の反乱(功臣の乱)。
 def sbCourtRevolt(rs, i) :=
@@ -572,16 +625,17 @@ def sbCourtRevolt(rs, i) :=
 -- ── 遠征 × 兵站 ────────────────────────────────────────────────────
 -- 破天荒(世界の果てへ)を許すが、距離・兵糧・運が現実を突きつける。
 -- dist が難度(遠いほど兵糧要求と失敗率が跳ね上がる)。
+-- 遠征先。dist=兵站距離、fx/fy=世界図(0..160×0..90)上の位置(方位×距離感)。
 def sbFrontiers := [
-  {id: "xiongnu",  name: "匈奴",           dist: 2},
-  {id: "chaoxian", name: "朝鮮",           dist: 3},
-  {id: "nanyue",   name: "南越",           dist: 3},
-  {id: "xiyu",     name: "西域",           dist: 4},
-  {id: "wa",       name: "倭（日本）",     dist: 5},
-  {id: "yuezhi",   name: "大月氏",         dist: 6},
-  {id: "shendu",   name: "身毒（印度）",   dist: 7},
-  {id: "anxi",     name: "安息（波斯）",   dist: 8},
-  {id: "daqin",    name: "大秦・エジプト", dist: 10}
+  {id: "xiongnu",  name: "匈奴",           dist: 2,  fx: 108, fy: 20},
+  {id: "chaoxian", name: "朝鮮",           dist: 3,  fx: 132, fy: 26},
+  {id: "nanyue",   name: "南越",           dist: 3,  fx: 103, fy: 72},
+  {id: "xiyu",     name: "西域",           dist: 4,  fx: 76,  fy: 40},
+  {id: "wa",       name: "倭（日本）",     dist: 5,  fx: 149, fy: 46},
+  {id: "yuezhi",   name: "大月氏",         dist: 6,  fx: 58,  fy: 28},
+  {id: "shendu",   name: "身毒（印度）",   dist: 7,  fx: 64,  fy: 70},
+  {id: "anxi",     name: "安息（波斯）",   dist: 8,  fx: 38,  fy: 44},
+  {id: "daqin",    name: "大秦・エジプト", dist: 10, fx: 13,  fy: 52}
 ]
 
 def sbFrontierAt(fs, id, i) :=
@@ -635,7 +689,7 @@ def sbCourtErode(court, d) :=
     (let r := arrGet(rs, di);
      let r2 := {name: r.name, loyalty: sbClamp(r.loyalty - d), ambition: r.ambition, troops: r.troops, alive: r.alive};
      {retainers: arrSet(rs, di, r2), drama: court.drama, purges: court.purges,
-      supply: court.supply, fame: court.fame, doom: court.doom})
+      supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat, landmarks: court.landmarks})
 
 -- 遠征の解決。強さ(支配率合計)+運-距離-兵糧不足 で階層を決める。
 -- 遠いほど本国が留守になり、被侵攻と功臣の離心を招く(overreach の代償)。
@@ -669,7 +723,7 @@ def sbExpedition(world, targetId) :=
   let exposed := (rngInt() % 12) < dist;
   let inv := if exposed then sbInvasion(regions2, world.who) else {regions: regions2, line: ""};
   let court1 := {retainers: court.retainers, drama: court.drama, purges: court.purges,
-                 supply: supply2, fame: court.fame + fameGain, doom: doom};
+                 supply: supply2, fame: court.fame + fameGain, doom: doom, threat: court.threat, landmarks: court.landmarks};
   let court2 := sbCourtErode(court1, idiv(dist, 2));
   let expLine := sbExpeditionLine(f.name, tier);
   let log2 := if inv.line == "" then arrPush(world.log, expLine)
@@ -704,7 +758,7 @@ def sbApplyGmAction(world, action) :=
            sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
              world.log, world.pending, world.who,
              {retainers: arrSet(rs, idx, {name: r.name, loyalty: sbClamp(r.loyalty + action.d), ambition: r.ambition, troops: r.troops, alive: r.alive}),
-              drama: c.drama, purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom})))
+              drama: c.drama, purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom, threat: c.threat, landmarks: c.landmarks})))
      else if action.type == "rebellion" then
        (let idx := sbRetIdxByName(rs, action.who, 0);
         if idx < 0 then world
@@ -713,7 +767,13 @@ def sbApplyGmAction(world, action) :=
            sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
              world.log, world.pending, world.who,
              {retainers: arrSet(rs, idx, {name: r.name, loyalty: 0, ambition: r.ambition, troops: maxI(40, r.troops), alive: r.alive}),
-              drama: {who: r.name, idx: idx, kind: "rebellion"}, purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom})))
+              drama: {who: r.name, idx: idx, kind: "rebellion"}, purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom, threat: c.threat, landmarks: c.landmarks})))
+     else if action.type == "landmark" then
+       (let xy := sbTargetXY(world, action.target);
+        sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
+          arrPush(world.log, sconcat("🏛 ", sconcat(action.ja, "を築いた。世界に、爪痕を残す。"))),
+          world.pending, world.who,
+          sbCourtAddLandmark(c, {ja: action.ja, icon: action.icon, x: xy.x, y: xy.y - 3})))
      else world)
 
 -- ── 主人公アンカー ────────────────────────────────────────────────
@@ -933,18 +993,122 @@ def sbInvasion(regions, who) :=
        else sconcat("⚑ ", sconcat(sbName(enemy), sconcat("が", sconcat(mr.ja, "を襲い、支配が揺らいだ。"))));
      {regions: regions2, line: line})
 
+-- ── 危機カウントダウン ──────────────────────────────────────────
+-- 盤面は常に「差し迫る事態」を最大1つ抱える。放置すると turnsLeft が減り、
+-- 0 で確定的な悪い帰結が火を噴く(兵站崩壊/功臣反乱→会戦/国境突破)。
+-- プレイヤーのアドリブや構造化アクションが対処すれば解除される。
+-- threat: {kind, who, turnsLeft, label} または null。
+
+def sbCourtSetThreat(c, t) :=
+  {retainers: c.retainers, drama: c.drama, purges: c.purges,
+   supply: c.supply, fame: c.fame, doom: c.doom, threat: t, landmarks: c.landmarks}
+
+def sbEnemyFaction(pf) := if pf == "han" then "chu" else "han"
+
+-- 現在の緊迫度(目安)。危うい功臣/兵站欠乏/敵の優勢/粛清の反動を合算。
+def sbPressure(world) :=
+  let c := world.court;
+  let di := sbDangerIdx(c.retainers, 0, 0, 0 - 1);
+  let dScore := if di < 0 then 0
+                else (let r := arrGet(c.retainers, di); maxI(0, r.ambition + r.troops - r.loyalty));
+  let pf := sbPlayerFaction(world.who);
+  let enemy := sbCtrlSum(world.regions, sbEnemyFaction(pf), 0, 0);
+  let mine := sbCtrlSum(world.regions, pf, 0, 0);
+  dScore + maxI(0, 40 - c.supply) + maxI(0, (enemy - mine) / 4) + c.purges * 8
+
+-- 状態に即した脅威を新造(該当なければ null)。turnsLeft は 3。
+def sbNewThreat(world) :=
+  let c := world.court;
+  let pf := sbPlayerFaction(world.who);
+  let di := sbDangerIdx(c.retainers, 0, 0, 0 - 1);
+  let rScore := if di < 0 then 0
+                else (let r := arrGet(c.retainers, di); maxI(0, r.ambition + r.troops - r.loyalty));
+  if c.supply <= 25 then
+    {kind: "supply", who: "", turnsLeft: 3,
+     label: sconcat("兵糧が尽きかけている（残 ", sconcat(numStr(c.supply), "）。飢える前に手を打て。"))}
+  else if di >= 0 && rScore >= 70 then
+    (let r := arrGet(c.retainers, di);
+     {kind: "retainer", who: r.name, turnsLeft: 3,
+      label: sconcat(r.name, "が兵を集め、目が剣呑だ。繋ぎ止めるか、抑えるか。")})
+  else if sbCtrlSum(world.regions, sbEnemyFaction(pf), 0, 0) > sbCtrlSum(world.regions, pf, 0, 0) + 20 then
+    {kind: "invasion", who: "", turnsLeft: 3,
+     label: sconcat(sbName(sbEnemyFaction(pf)), "が国境に軍を集めている。放てば領土を失う。")}
+  else null
+
+-- 猶予切れの確定帰結。{regions, court, line} を返し、脅威は解除。
+def sbThreatFire(world, t) :=
+  let c := world.court;
+  if t.kind == "supply" then
+    {regions: world.regions,
+     court: {retainers: sbLoyaltyAll(c.retainers, 0 - 12), drama: c.drama, purges: c.purges,
+             supply: 0, fame: c.fame, doom: c.doom, threat: null, landmarks: c.landmarks},
+     line: "⚑ 兵糧が尽きた。軍は飢え、将卒の心が離れていく。"}
+  else if t.kind == "retainer" then
+    (let idx := sbRetIdxByName(c.retainers, t.who, 0);
+     {regions: world.regions,
+      court: {retainers: c.retainers, drama: {who: t.who, idx: idx, kind: "rebellion"},
+              purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom, threat: null, landmarks: c.landmarks},
+      line: sconcat("⚑ ", sconcat(t.who, "が公然と兵を挙げた。会戦は避けられない。"))})
+  else
+    (let pf := sbPlayerFaction(world.who);
+     let ti := sbTopIdxOf(world.regions, pf, 0, 0 - 1, 0);
+     {regions: sbAdj(world.regions, ti, 0 - 30),
+      court: sbCourtSetThreat(c, null),
+      line: sconcat("⚑ ", sconcat(sbName(sbEnemyFaction(pf)), "が国境を破り、要地が大きく削られた。"))})
+
+-- 脅威が(プレイヤーの対処で)解消されたか。兵站回復/忠誠回復or失脚/
+-- 敵の優勢解消。これでアドリブが危機を鎮めるループが閉じる。
+def sbThreatResolved(world, t) :=
+  let c := world.court;
+  -- 解除は"生成より低い閾値"で判定(ヒステリシス)。でないと生成条件と
+  -- 解除条件が重なって毎ターン点いて消えてカウントダウンが進まない。
+  if t.kind == "supply" then c.supply > 45
+  else if t.kind == "retainer" then
+    (let idx := sbRetIdxByName(c.retainers, t.who, 0);
+     let r := arrGet(c.retainers, idx);
+     -- 生成 rScore>=70 / 解除 rScore<=50。強い忠誠付与(loyalty +30)一手で
+     -- 鎮まる幅にして、アドリブが危機に効く手応えを出す。
+     (r.alive == false) || (maxI(0, r.ambition + r.troops - r.loyalty) <= 50))
+  else
+    (let pf := sbPlayerFaction(world.who);
+     sbCtrlSum(world.regions, sbEnemyFaction(pf), 0, 0) <= sbCtrlSum(world.regions, pf, 0, 0) + 8)
+
+-- 1ターンぶんの脅威処理。{regions, court, line} を返す。
+def sbThreatStep(world) :=
+  let c := world.court;
+  if c.threat == null then
+    (let t := sbNewThreat(world);
+     if t == null then {regions: world.regions, court: c, line: ""}
+     else {regions: world.regions, court: sbCourtSetThreat(c, t),
+           line: sconcat("⚠ 差し迫る事態: ", t.label)})
+  else if sbThreatResolved(world, c.threat) then
+    {regions: world.regions, court: sbCourtSetThreat(c, null),
+     line: sconcat("✓ 危機は去った: ", c.threat.label)}
+  else
+    (let t := c.threat;
+     let left := t.turnsLeft - 1;
+     if left > 0 then
+       {regions: world.regions,
+        court: sbCourtSetThreat(c, {kind: t.kind, who: t.who, turnsLeft: left, label: t.label}),
+        line: sconcat("⌛ ", sconcat(t.label, sconcat("（猶予 残り", sconcat(numStr(left), "ターン）"))))}
+     else sbThreatFire(world, t))
+
 def sbTick(world) :=
   let e := sbTickEvent(world);
   -- 静観の間も国は少しずつ兵糧を蓄える。
-  let court2 := sbCourtGainSupply(sbCourtTick(world.court, world), 4);
+  let court1 := sbCourtGainSupply(sbCourtTick(world.court, world), 4);
+  -- 危機カウントダウン(regions も動きうる)。
+  let th := sbThreatStep(sbWorld(world.mode, world.year, world.season, world.loc,
+              e.regions, world.log, world.pending, world.who, court1));
   -- 双方向:一定確率で敵があなたの領地に攻め寄せる(一方的な征服にしない)
-  let inv := if rngInt() % 3 == 0 then sbInvasion(e.regions, world.who)
-             else {regions: e.regions, line: ""};
-  let log2 := if inv.line == "" then arrPush(world.log, e.line)
-              else arrPush(arrPush(world.log, e.line), inv.line);
+  let inv := if rngInt() % 3 == 0 then sbInvasion(th.regions, world.who)
+             else {regions: th.regions, line: ""};
+  let log1 := arrPush(world.log, e.line);
+  let log1b := if th.line == "" then log1 else arrPush(log1, th.line);
+  let log2 := if inv.line == "" then log1b else arrPush(log1b, inv.line);
   sbWorld(world.mode, sbNextYear(world.year, world.season),
     sbNextSeason(world.season), world.loc,
-    inv.regions, log2, 0, world.who, court2)
+    inv.regions, log2, 0, world.who, th.court)
 
 -- ── 会戦の解決(演出の裏で盤面を動かす)──────────────────────────
 def sbCtrlSum(regions, f, i, acc) :=
@@ -995,6 +1159,64 @@ def sbBattleResolve(world) :=
 
 -- ── マップ描画(SVG 文字列)──────────────────────────────────────
 def sbRad(ctrl) := if ctrl > 70 then 7 else if ctrl > 40 then 5 else 4
+
+-- ユーラシアの陸塊(様式化・控えめ)。海は SVG 背景色。
+def sbWorldLand :=
+  sjoin([
+    "<path d='M8,40 Q26,22 60,18 Q100,12 128,20 Q150,26 150,36 Q150,46 138,48 Q150,52 140,58 Q116,66 92,64 Q64,66 44,62 Q22,58 10,50 Z' fill='#1c2a1a' fill-opacity='0.5' stroke='#2e4028' stroke-width='0.3'/>",
+    "<path d='M56,60 Q64,80 72,60 Q66,64 56,60 Z' fill='#1c2a1a' fill-opacity='0.5' stroke='#2e4028' stroke-width='0.25'/>",
+    "<circle cx='149' cy='46' r='3.4' fill='#1c2a1a' fill-opacity='0.5' stroke='#2e4028' stroke-width='0.25'/>"
+  ])
+
+-- 遠征先を世界図に配置。中央(中国)から破線の遠征路、節点はクリックで遠征。
+def sbFrontierNodes(fs, i, acc) :=
+  if i < arrLen(fs) then
+    (let f := arrGet(fs, i);
+     let node := sjoin([
+       "<line x1='108' y1='45' x2='", numStr(f.fx), "' y2='", numStr(f.fy),
+       "' stroke='#6a5a3a' stroke-width='0.25' stroke-dasharray='1.4 1.4' opacity='0.45'/>",
+       "<g data-msg=", msgAttr({tag: "expedition", target: f.id}), " style='cursor:pointer'>",
+       "<circle cx='", numStr(f.fx), "' cy='", numStr(f.fy),
+       "' r='2.4' fill='#2a2016' stroke='#c8a86a' stroke-width='0.35' stroke-dasharray='1 0.7'/>",
+       "<text x='", numStr(f.fx), "' y='", numStr(f.fy - 3.2),
+       "' font-size='2.9' text-anchor='middle' fill='#c8a86a'>", hesc(f.name), "</text>",
+       "<text x='", numStr(f.fx), "' y='", numStr(f.fy + 4.4),
+       "' font-size='2' text-anchor='middle' fill='#7a6a4a'>兵站", numStr(f.dist), "</text>",
+       "</g>"
+     ]);
+     sbFrontierNodes(fs, i + 1, sconcat(acc, node)))
+  else acc
+
+-- プレイヤーが築いた記念物(ピラミッド等)を地図に刻む。court.landmarks。
+def sbLandmarkLoop(lms, i, acc) :=
+  if i < arrLen(lms) then
+    (let m := arrGet(lms, i);
+     let node := sjoin([
+       "<text x='", numStr(m.x), "' y='", numStr(m.y),
+       "' font-size='4.6' text-anchor='middle'>", hesc(m.icon), "</text>",
+       "<text x='", numStr(m.x), "' y='", numStr(m.y + 4),
+       "' font-size='2.1' text-anchor='middle' fill='#e8d8a0'>", hesc(m.ja), "</text>"
+     ]);
+     sbLandmarkLoop(lms, i + 1, sconcat(acc, node)))
+  else acc
+
+def sbLandmarks(court) :=
+  sbLandmarkLoop((if court.landmarks then court.landmarks else []), 0, "")
+
+-- 地名(地域 or 遠征先) → 世界図座標。無ければ現在地。
+def sbTargetXY(world, target) :=
+  let ri := sbIdxOf(world.regions, target, 0);
+  let rr := arrGet(world.regions, ri);
+  if rr.id == target then {x: rr.x, y: rr.y}
+  else
+    (let f := sbFrontierAt(sbFrontiers, target, 0);
+     if f.id == target then {x: f.fx, y: f.fy}
+     else (let pr := arrGet(world.regions, sbIdxOf(world.regions, world.loc, 0)); {x: pr.x, y: pr.y}))
+
+def sbCourtAddLandmark(c, m) :=
+  {retainers: c.retainers, drama: c.drama, purges: c.purges, supply: c.supply,
+   fame: c.fame + 5, doom: c.doom, threat: c.threat,
+   landmarks: arrPush((if c.landmarks then c.landmarks else []), m)}
 
 def sbMapLoop(regions, i, acc) :=
   if i < arrLen(regions) then
@@ -1315,12 +1537,29 @@ def sbExpPanel(court) :=
     "</div></details>"
   ])
 
+-- 差し迫る事態(危機カウントダウン)の赤バー。無ければ空。
+def sbThreatBar(court) :=
+  if court.threat == null then ""
+  else
+    (let t := court.threat;
+     let hot := t.turnsLeft <= 1;
+     sjoin([
+      "<div style='margin:10px 0;padding:9px 12px;background:", (if hot then "#3a0d0d" else "#2a0f0f"),
+      ";border:1px solid #7a2a2a;border-left:4px solid ", (if hot then "#ff5a5a" else "#d84a4a"),
+      ";border-radius:6px;color:#f2c4c4;font-size:13px'>",
+      "<b style='color:#ff8a8a'>⚠ 差し迫る事態</b> ・ 猶予 <b>", numStr(t.turnsLeft), "</b> ターン<br>",
+      hesc(t.label),
+      "</div>"]))
+
 def viewSandbox(state) :=
   let w := state.world;
   let hasDrama := w.court.drama != null;
   let map := sjoin([
-    "<svg viewBox='0 0 100 92' style='width:100%;max-width:540px;height:auto;background:#17140f;border:1px solid #4a3f2f;border-radius:8px;display:block;margin:0 auto'>",
+    "<svg viewBox='0 0 160 90' preserveAspectRatio='xMidYMid meet' style='width:100%;height:auto;max-height:66vh;background:#0b1420;border:1px solid #4a3f2f;border-radius:8px;display:block'>",
+    sbWorldLand,
+    sbFrontierNodes(sbFrontiers, 0, ""),
     sbMapLoop(w.regions, 0, ""),
+    sbLandmarks(w.court),
     sbMarker(w.regions, w.loc),
     "</svg>"
   ]);
@@ -1333,12 +1572,13 @@ def viewSandbox(state) :=
     else sjoin([
       "<input id='gmInput' placeholder='劉邦として何をする? 例: エジプトを目指す' ",
       "style='width:100%;padding:9px;background:#0f0d0a;border:1px solid #4a3f2f;color:#eee;border-radius:6px;box-sizing:border-box'/>",
-      "<div style='display:flex;gap:8px;margin-top:8px;flex-wrap:wrap'>",
-      "<button id='gmSend' class='btn btn-primary'>行動する（⌘/Ctrl+Enter）</button>",
+      "<button id='gmSend' class='btn btn-primary' style='width:100%;margin-top:8px'>行動する（⌘/Ctrl+Enter）</button>",
+      -- コマンドは 2 列グリッドで整列(バラバラに折り返さない)。
+      "<div style='display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:8px'>",
       button("primary", {tag: "sbAdvance"}, "季を進める ▶"),
       button("primary", {tag: "sbSpecial"}, sbSpecialLabel(w.who)),
-      "<button id='sbAction' class='btn btn-primary'>🗡 出撃</button>",
-      "<button id='sbBattle' class='btn btn-ghost'>⚔ 会戦</button>",
+      "<button id='sbAction' class='btn btn-primary' style='width:100%'>🗡 出撃</button>",
+      "<button id='sbBattle' class='btn btn-ghost' style='width:100%'>⚔ 会戦</button>",
       "</div>",
       sbExpPanel(w.court),
       "<div style='display:flex;gap:8px;align-items:center;margin-top:8px;font-size:11px;color:#8a7d63;flex-wrap:wrap'>",
@@ -1346,23 +1586,23 @@ def viewSandbox(state) :=
       "<span id='gmAiStatus'>未起動でもローカルで進行可</span></div>"
     ]);
   sjoin([
-    "<div style='max-width:980px;margin:0 auto;padding:12px'>",
-    "<canvas id='sbAtmo' width='520' height='44' style='width:100%;height:44px;display:block;margin-bottom:8px;border-radius:8px;border:1px solid #4a3f2f'></canvas>",
+    -- 横長(FHD ~16:9)ベース。フルスクリーン向きに広く使う。
+    "<div style='max-width:1760px;margin:0 auto;padding:14px 20px'>",
+    "<canvas id='sbAtmo' width='520' height='44' style='width:100%;height:40px;display:block;margin-bottom:8px;border-radius:8px;border:1px solid #4a3f2f'></canvas>",
     "<div style='display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px'>",
     "<h2 style='margin:0;font-size:19px'>群雄割拠 ― ", hesc(w.who),
     " <span style='font-size:11px;color:#888'>", hesc(modeBadge), " β</span></h2>",
     "<div style='color:#ffd54a;font-size:13px'>", hesc(date),
     " ・ 兵糧 ", numStr(w.court.supply), " ・ 名声 ", numStr(w.court.fame), "</div>",
     "</div>",
-    -- 2カラム(広い画面では横並び、狭ければ縦積み)
-    "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;margin-top:10px;align-items:start'>",
+    sbThreatBar(w.court),
+    -- 横長 2カラム: 左=世界図を大きく / 右=操作・動静・情景。
+    "<div style='display:grid;grid-template-columns:minmax(0,1.7fr) minmax(320px,1fr);gap:18px;margin-top:10px;align-items:start'>",
     -- 左:地図・勢力・功臣・群衆
     "<div>",
     map,
     sbFactionBar(w.regions),
     sbRoster(w.court),
-    "<div style='text-align:center;color:#8a7d63;font-size:11px;margin-top:6px'>陣中 ― 兵たちが蠢く</div>",
-    "<canvas id='sbStage' width='520' height='150' style='width:100%;height:auto;display:block;margin:4px auto 0;background:linear-gradient(#1c1811,#100e0a);border:1px solid #4a3f2f;border-radius:8px'></canvas>",
     "</div>",
     -- 右:動静ログ・操作・画像
     "<div>",

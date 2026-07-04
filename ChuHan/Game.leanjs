@@ -485,6 +485,13 @@ def update(msg, state) :=
       char: state.char, sceneId: state.sceneId, beat: state.beat,
       stats: state.stats, flags: state.flags,
       battle: state.battle, endingId: state.endingId, toast: state.toast , mini: state.mini, llm: state.llm, resolve: state.resolve}
+  -- アドリブ乗っ取り: 台本のセリフ箱を LLM 進行に切り替える(本編と地続き)。
+  | "improvStart" =>
+    (let step := stepAt(sceneOf(state.sceneId), state.beat);
+     let seed := if state.lang == "en" then (if step.sayEn == "" then step.sayJa else step.sayEn) else step.sayJa;
+     sceneImprov(state, {on: true, text: seed}))
+  | "improvBeat" => sceneImprov(state, {on: true, text: msg.text})
+  | "improvEnd"  => sceneImprov(state, {on: false, text: ""})
   | "advance" => (
     if state.phase != "scene" then state
     else
@@ -1274,20 +1281,50 @@ def renderChoices(state, step) :=
   if arrLen(cs) == 0 then ""
   else sjoin(["<div class='choices'>", choicesLoop(state, cs, 0, ""), "</div>"])
 
+-- 現在の scene state を保ちつつ improv フィールドだけ差し替える。
+def sceneImprov(state, improv) :=
+  { phase: "scene", lang: state.lang, char: state.char, sceneId: state.sceneId, beat: state.beat,
+    stats: state.stats, flags: state.flags, battle: state.battle, endingId: state.endingId,
+    toast: state.toast, mini: state.mini, llm: state.llm, resolve: state.resolve, improv: improv }
+
 def viewScene(state) :=
   let scene := sceneOf(state.sceneId);
   let step := stepAt(scene, state.beat);
   let bg := if step.bg == "" then "bg-pei" else step.bg;
-  let advanceClick := if arrLen(step.choices) == 0
-                      then sjoin([" data-msg=", msgAttr({tag: "advance"})]) else "";
+  let improvOn := if state.improv != null then state.improv.on else false;
+  let advClick := if (arrLen(step.choices) == 0) && (improvOn == false)
+                  then sjoin([" data-msg=", msgAttr({tag: "advance"})]) else "";
   sjoin([
-    "<div class='scene-bg ", bg, "'", advanceClick, ">",
+    "<div class='scene-bg ", bg, "'", advClick, ">",
     renderHud(state),
     renderSprites(step),
-    renderChoices(state, step),
-    renderDialogueBox(state, step),
+    (if improvOn then "" else renderChoices(state, step)),
+    (if improvOn then renderImprovBox(state) else renderSceneDialogue(state, step)),
     "</div>"
   ])
+
+-- 台本のセリフ箱 + 「自分で動く」入口。
+def renderSceneDialogue(state, step) :=
+  sjoin([
+    renderDialogueBox(state, step),
+    "<div style='position:fixed;left:14px;bottom:14px;z-index:45'>",
+    button("ghost", {tag: "improvStart"}, "✍ ここから自分で動く"),
+    "</div>"
+  ])
+
+-- アドリブが本編を乗っ取ったセリフ箱: 生成された地の文 + 入力で物語を継ぐ。
+def renderImprovBox(state) :=
+  panel("dialogue", "", sjoin([
+    "<div style='font-size:11px;color:#c8a86a;letter-spacing:1px;margin-bottom:6px'>― 筆はあなたの手に ―</div>",
+    "<div style='line-height:2;font-size:16px;color:#f0e6d2;margin-bottom:12px;white-space:pre-wrap'>", hesc(state.improv.text), "</div>",
+    "<input id='improvGo' placeholder='どうする? 何と言う?' style='width:100%;padding:9px;background:#0f0d0a;border:1px solid #4a3f2f;color:#eee;border-radius:6px;box-sizing:border-box'/>",
+    "<div style='display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center'>",
+    "<button id='improvGoBtn' class='btn btn-primary' style='font-size:13px'>綴る ▶（⌘/Ctrl+Enter）</button>",
+    "<button id='improvFinish' class='btn btn-ghost' style='font-size:12px'>▣ 物語を結ぶ</button>",
+    button("ghost", {tag: "improvEnd"}, "台本へ戻る"),
+    "<span id='improvStatus' style='font-size:11px;color:#8a7d63'></span>",
+    "</div>"
+  ]))
 
 -- Ending screen
 def endingTitle(id) :=
