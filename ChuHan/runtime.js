@@ -436,11 +436,16 @@ function scenePrompt() {
   return state.world ? sbScenePrompt(state.world) : '';
 }
 
+let imggenLoadPromise = null;   // shared so a 2nd genScene() awaits the same load
 async function loadImgGen() {
-  if (imggen.ready || imggen.loading) return false;
+  if (imggen.ready) return true;
+  // Load already running: await it and report the resulting readiness,
+  // rather than early-returning false (the "1st click does nothing" bug).
+  if (imggen.loading) { if (imggenLoadPromise) { try { await imggenLoadPromise; } catch (_) {} } return imggen.ready; }
   if (!navigator.gpu) { imgStatus('この端末は WebGPU 非対応（絵はスキップ）'); return false; }
   imggen.loading = true;
   imgStatus('画家を読み込み中…（サーバの /models から。初回のみ）');
+  imggenLoadPromise = (async () => {
   try {
     if (!imggen.mod) imggen.mod = await import('https://esm.run/@aislamov/diffusers.js');
     // Point diffusers.js at our locally-served model cache. It builds
@@ -453,17 +458,18 @@ async function loadImgGen() {
     });
     imggen.ready = true;
     imgStatus('画家 起動済み');
-    return true;
   } catch (e) {
     const em = (e && e.message ? e.message : String(e));
     const calm = /401|403|404|not found|status/i.test(em)
       ? '画像生成モデルを読み込めませんでした（実験的機能・環境により未対応）。進行には影響しません。'
       : '画像生成に失敗しました（' + em.slice(0, 60) + '）。進行には影響しません。';
     imgStatus(calm);
-    return false;
   } finally {
     imggen.loading = false;
   }
+  })();
+  await imggenLoadPromise;
+  return imggen.ready;
 }
 
 async function genScene() {
@@ -934,23 +940,32 @@ function gmAiStatus(msg) {
   if (b) b.textContent = msg;
 }
 
+let webllmLoadPromise = null;   // shared so concurrent callers await the SAME load
 async function loadBrowserAI() {
-  if (webllm.ready || webllm.loading) return;
+  if (webllm.ready) return;
+  // A load is already running (e.g. kicked off by a chat send): AWAIT it,
+  // don't early-return — otherwise `await loadBrowserAI()` resolves before
+  // the model is ready and the caller sees ready===false (the "1st press
+  // fails, 2nd works" bug on the 決着 button).
+  if (webllm.loading) { if (webllmLoadPromise) { try { await webllmLoadPromise; } catch (_) {} } return; }
   if (!navigator.gpu) { gmAiStatus('この端末は WebGPU 非対応（サーバ/ローカルで進行）'); return; }
   webllm.loading = true;
   gmAiStatus('AI 軍師を読み込み中…（初回のみ ~1GB DL・以後キャッシュ）');
-  try {
-    if (!webllm.mod) webllm.mod = await import('https://esm.run/@mlc-ai/web-llm');
-    webllm.engine = await webllm.mod.CreateMLCEngine(WEBLLM_MODEL, {
-      initProgressCallback: (p) => gmAiStatus('AI 軍師 読み込み: ' + (p.text || Math.round((p.progress || 0) * 100) + '%'))
-    });
-    webllm.ready = true;
-    gmAiStatus('AI 軍師 起動済み（行動を書けば即興で応答）');
-  } catch (e) {
-    gmAiStatus('AI 起動失敗: ' + (e && e.message ? e.message : e) + '（サーバ/ローカルで進行）');
-  } finally {
-    webllm.loading = false;
-  }
+  webllmLoadPromise = (async () => {
+    try {
+      if (!webllm.mod) webllm.mod = await import('https://esm.run/@mlc-ai/web-llm');
+      webllm.engine = await webllm.mod.CreateMLCEngine(WEBLLM_MODEL, {
+        initProgressCallback: (p) => gmAiStatus('AI 軍師 読み込み: ' + (p.text || Math.round((p.progress || 0) * 100) + '%'))
+      });
+      webllm.ready = true;
+      gmAiStatus('AI 軍師 起動済み（行動を書けば即興で応答）');
+    } catch (e) {
+      gmAiStatus('AI 起動失敗: ' + (e && e.message ? e.message : e) + '（サーバ/ローカルで進行）');
+    } finally {
+      webllm.loading = false;
+    }
+  })();
+  await webllmLoadPromise;
 }
 
 function stripFence(s) {
@@ -1036,12 +1051,24 @@ async function runBrowserConclude(npcName, history) {
     + '会話が真に説得的なら、史実を覆す大胆な帰結（暗殺・寝返り・決裂・和睦など）も起こしてよい。'
     + '凡庸・無策・失礼なら、何も変わらぬまま終わる。'
     + '返答は必ず次のJSON1行のみ: {"title":"結末の題(8字以内)","text":"帰結の描写(80-160字・日本語)","changed":true or false}';
-  const r = await webllm.engine.chat.completions.create({
-    messages: [{ role: 'system', content: sys },
-      { role: 'user', content: '【会話】\n' + convo + '\n\nこの会話の結末を判定し、描け。' }],
-    temperature: 0.9, max_tokens: 320
-  });
-  const j = JSON.parse(stripFence(r.choices[0].message.content));
+  const ask = async (extra) => {
+    const r = await webllm.engine.chat.completions.create({
+      messages: [{ role: 'system', content: sys + (extra || '') },
+        { role: 'user', content: '【会話】\n' + convo + '\n\nこの会話の結末を判定し、JSONだけで答えよ。' }],
+      temperature: 0.8, max_tokens: 320
+    });
+    return (r.choices[0].message.content) || '';
+  };
+  // Small models often wrap the JSON in prose/fences — extract the {...}
+  // span and, if that still fails, retry once with a firmer instruction.
+  const parse = (s) => {
+    const t = stripFence(s);
+    const a = t.indexOf('{'), b = t.lastIndexOf('}');
+    return JSON.parse(a >= 0 && b > a ? t.slice(a, b + 1) : t);
+  };
+  let j;
+  try { j = parse(await ask('')); }
+  catch (_) { j = parse(await ask(' 前置き・説明・コードフェンスは一切禁止。JSONオブジェクトのみを返せ。')); }
   return { title: j.title || 'その後', text: j.text || '', changed: !!j.changed };
 }
 

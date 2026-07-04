@@ -76,14 +76,66 @@ def crawlerJs : String :=
   return { errors, tags: [...tags], clicks, reachedConclude, concludeClicked };
 })()"
 
+/-- Image-gen diagnostic: probe the three things `loadImgGen` needs —
+WebGPU (`navigator.gpu`), the diffusers.js ESM import, and the locally
+served model files — plus try a real `fromPretrained` load (bounded by a
+timeout) and report the actual error. Answers "why doesn't image gen
+work?" without a screenshot. -/
+def imgProbeJs : String :=
+"(async () => {
+  const out = { gpu: !!navigator.gpu, importOk: false, importErr: '', hasPipeline: false, hasSetCache: false, model: {}, load: 'skipped', loadErr: '' };
+  let mod = null;
+  try {
+    mod = await import('https://esm.run/@aislamov/diffusers.js');
+    out.importOk = !!mod;
+    out.hasPipeline = !!(mod && mod.DiffusionPipeline);
+    out.hasSetCache = !!(mod && mod.setModelCacheDir);
+  } catch (e) { out.importErr = String((e && e.message) || e); }
+  const base = location.origin + '/models/aislamov/stable-diffusion-2-1-base-onnx/';
+  for (const f of ['model_index.json', 'unet/model.onnx', 'vae_decoder/model.onnx_data']) {
+    try { const r = await fetch(base + f, { headers: { Range: 'bytes=0-0' } }); out.model[f] = r.status; }
+    catch (e) { out.model[f] = 'ERR ' + ((e && e.message) || e); }
+  }
+  if (out.gpu && out.hasPipeline) {
+    try {
+      if (mod.setModelCacheDir) mod.setModelCacheDir(location.origin + '/models');
+      const load = mod.DiffusionPipeline.fromPretrained('aislamov/stable-diffusion-2-1-base-onnx', { progressCallback: () => {} });
+      const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('load timeout (120s)')), 120000));
+      await Promise.race([load, timeout]);
+      out.load = 'ok';
+    } catch (e) { out.load = 'fail'; out.loadErr = String((e && e.message) || e).slice(0, 240); }
+  } else {
+    out.load = out.gpu ? 'no-pipeline' : 'no-webgpu';
+  }
+  return out;
+})()"
+
 private def jsonArr (j : Json) (key : String) : Array Json :=
   ((j.getObjVal? key).toOption.getD Json.null |>.getArr?).toOption.getD #[]
 
 private def jsonBool (j : Json) (key : String) : Bool :=
   ((j.getObjVal? key).toOption.getD Json.null |>.getBool?).toOption.getD false
 
+/-- Image-gen diagnostic run: report WebGPU / import / model / load. -/
+def runImgProbe (url : String) : IO Unit := do
+  IO.println s!"chuhan-e2e[img]: probing image generation at {url}"
+  withSession fun s => do
+    let _ ← s.navigate url
+    let r ← s.evaluate imgProbeJs
+    IO.println s!"  {r.compress}"
+    let gpu := ((r.getObjVal? "gpu").toOption.getD Json.null |>.getBool?).toOption.getD false
+    let load := ((r.getObjVal? "load").toOption.getD Json.null |>.getStr?).toOption.getD "?"
+    if !gpu then
+      IO.println "  → navigator.gpu ABSENT: this browser/headless mode has no WebGPU."
+      IO.println "    image gen cannot run here; retry headed (LEANTEA_BROWSER_HEADLESS=0) on a GPU."
+    else if load == "ok" then
+      IO.println "  → OK: WebGPU present, diffusers imported, model pipeline loaded."
+    else
+      IO.println s!"  → image gen FAILS at stage: {load}"
+
 def main : IO Unit := do
   let url := (← IO.getEnv "CHUHAN_URL").getD "http://127.0.0.1:8090/"
+  if (← IO.getEnv "E2E_MODE") == some "img" then runImgProbe url else do
   IO.println s!"chuhan-e2e: driving {url} with a real Chromium"
   withSession fun s => do
     let nav ← s.navigate url
