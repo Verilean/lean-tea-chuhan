@@ -460,9 +460,10 @@ def update(msg, state) :=
   | "gmResult" => (
     let w := state.world;
     let regions2 := sbApplyDeltas(w.regions, msg.deltas, 0);
-    sbStep(state,
-      sbWorld(w.mode, sbNextYear(w.year, w.season), sbNextSeason(w.season),
-        w.loc, regions2, arrPush(w.log, msg.narration), 0, w.who, w.court)))
+    let w1 := sbWorld(w.mode, sbNextYear(w.year, w.season), sbNextSeason(w.season),
+        w.loc, regions2, arrPush(w.log, msg.narration), 0, w.who, w.court);
+    -- GM が構造化アクション(遠征/反乱/忠誠/兵糧)を返していれば適用。
+    sbStep(state, sbApplyGmAction(w1, msg.action)))
   | "gmError" => (
     let w2 := sbTick(state.world);
     sbStep(state,

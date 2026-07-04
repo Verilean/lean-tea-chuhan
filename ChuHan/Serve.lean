@@ -448,9 +448,17 @@ private def gmSystemPrompt : String :=
 \n\n地域ID: guanzhong(關中) xianyang(咸陽) hanzhong(漢中) bashu(巴蜀) \
 pengcheng(彭城) wei(魏) zhao(趙) qi(齊)\
 \n勢力ID: han(漢) chu(楚) qin(秦) lords(諸侯)\
+\n\n功臣(部将): 韓信 彭越 英布 蕭何 張良。忠誠・野心・兵力を持ち、勝たせると脅威になる。\
+\n遠征先ID: xiongnu(匈奴) chaoxian(朝鮮) nanyue(南越) xiyu(西域) wa(倭/日本) yuezhi(大月氏) shendu(身毒) anxi(安息) daqin(大秦/エジプト)\
 \n\n返答は必ず次の JSON 1 行のみ。前後にコードブロックも文章も付けないこと:\
-\n{\"narration\":\"結果の描写(日本語 60-160字)\",\"deltas\":[{\"region\":\"地域ID\",\"dCtrl\":整数(-25〜25),\"owner\":\"勢力ID(領有が変わる時だけ)\"}]}\
-\n\ndCtrl は支配率の増減。owner は領有勢力が変わる時だけ入れる。deltas は 0〜3 個。"
+\n{\"narration\":\"結果の描写(日本語 60-160字)\",\"deltas\":[{\"region\":\"地域ID\",\"dCtrl\":整数(-25〜25),\"owner\":\"勢力ID(領有が変わる時だけ)\"}],\"action\":null}\
+\n\ndCtrl は支配率の増減。owner は領有勢力が変わる時だけ入れる。deltas は 0〜3 個。\
+\n\naction は任意。プレイヤーの行動がシステムを動かす時だけ、次のいずれかを入れる(普段は null):\
+\n・遠征を起こす: {\"type\":\"expedition\",\"target\":\"遠征先ID\"}(兵站と距離で成否が決まる。無謀なら破滅も)\
+\n・功臣を反乱させる: {\"type\":\"rebellion\",\"who\":\"功臣名\"}(冷遇や粛清の報い等。会戦で決する)\
+\n・忠誠を動かす: {\"type\":\"loyalty\",\"who\":\"功臣名\",\"d\":整数(-30〜30)}\
+\n・兵糧を動かす: {\"type\":\"supply\",\"d\":整数(-40〜40)}\
+\n行動が単なる会話や小さな采配なら action は null のまま、deltas だけで表す。"
 
 private def handleGm (cfg : LeanTea.Llm.Openai.Config) (req : Request) : IO Response := do
   match Json.parse (String.fromUTF8! req.body) with
@@ -479,9 +487,13 @@ private def handleGm (cfg : LeanTea.Llm.Openai.Config) (req : Request) : IO Resp
       | .ok j2 =>
         let narration := jstrField j2 "narration"
         let deltas := (j2.getObjVal? "deltas").toOption.bind (·.getArr?.toOption) |>.getD #[]
+        -- Pass through the optional structured action (expedition / rebellion
+        -- / loyalty / supply) so the client can drive the game systems.
+        let action := (j2.getObjVal? "action").toOption.getD Json.null
         let body := Json.mkObj [
           ("narration", Json.str (if narration.isEmpty then raw else narration)),
-          ("deltas", Json.arr deltas)
+          ("deltas", Json.arr deltas),
+          ("action", action)
         ]
         return Response.text 200 body.compress
       | .error _ =>

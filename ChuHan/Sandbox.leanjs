@@ -667,6 +667,45 @@ def sbExpedition(world, targetId) :=
   sbWorld(world.mode, sbNextYear(world.year, world.season), sbNextSeason(world.season),
     world.loc, inv.regions, log2, 0, world.who, court2)
 
+-- ── GM(LLM)の構造化アクション適用 ───────────────────────────────
+-- 名前で功臣の index を引く(無ければ -1)。
+def sbRetIdxByName(rs, name, i) :=
+  if i < arrLen(rs) then
+    (if arrGet(rs, i).name == name then i else sbRetIdxByName(rs, name, i + 1))
+  else 0 - 1
+
+-- GM が narration/deltas に加えて返せる構造化アクションを適用する。
+-- action = {type, target?, who?, d?}。type 無し/未知なら盤面はそのまま。
+-- これで LLM が「遠征を起こす」「韓信を反乱させる」等、システムを直接動かせる。
+def sbApplyGmAction(world, action) :=
+  if action == null then world
+  else
+    (let c := world.court;
+     let rs := c.retainers;
+     if action.type == "expedition" then sbExpedition(world, action.target)
+     else if action.type == "supply" then
+       sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
+         world.log, world.pending, world.who, sbCourtGainSupply(c, action.d))
+     else if action.type == "loyalty" then
+       (let idx := sbRetIdxByName(rs, action.who, 0);
+        if idx < 0 then world
+        else
+          (let r := arrGet(rs, idx);
+           sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
+             world.log, world.pending, world.who,
+             {retainers: arrSet(rs, idx, {name: r.name, loyalty: sbClamp(r.loyalty + action.d), ambition: r.ambition, troops: r.troops, alive: r.alive}),
+              drama: c.drama, purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom})))
+     else if action.type == "rebellion" then
+       (let idx := sbRetIdxByName(rs, action.who, 0);
+        if idx < 0 then world
+        else
+          (let r := arrGet(rs, idx);
+           sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
+             world.log, world.pending, world.who,
+             {retainers: arrSet(rs, idx, {name: r.name, loyalty: 0, ambition: r.ambition, troops: maxI(40, r.troops), alive: r.alive}),
+              drama: {who: r.name, idx: idx, kind: "rebellion"}, purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom})))
+     else world)
+
 -- ── 主人公アンカー ────────────────────────────────────────────────
 def sbAnchorLabel(anchor) :=
   if anchor == "liubang" then "劉邦"

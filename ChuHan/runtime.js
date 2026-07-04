@@ -930,7 +930,8 @@ async function runBrowserGM(action, world) {
   });
   const raw = stripFence(reply.choices[0].message.content);
   const j = JSON.parse(raw);   // throws → caller falls back
-  return { narration: j.narration || '（天は沈黙している）', deltas: Array.isArray(j.deltas) ? j.deltas : [] };
+  return { narration: j.narration || '（天は沈黙している）', deltas: Array.isArray(j.deltas) ? j.deltas : [],
+           action: j.action || null };
 }
 
 // ─── Sandbox game master wiring. Prefers the in-browser AI when it's
@@ -975,7 +976,7 @@ function wireGmHandlers() {
     if (webllm.ready) {
       try {
         const r = await runBrowserGM(text, world);
-        state = update({tag: 'gmResult', narration: r.narration, deltas: r.deltas}, state);
+        state = update({tag: 'gmResult', narration: r.narration, deltas: r.deltas, action: r.action || null}, state);
         done = true;
       } catch (e) { /* fall through to server */ }
     }
@@ -988,7 +989,7 @@ function wireGmHandlers() {
         });
         const j = await res.json();
         if (j.error) state = update({tag: 'gmError', text: ''}, state);
-        else state = update({tag: 'gmResult', narration: j.narration || '（天は沈黙している）', deltas: j.deltas || []}, state);
+        else state = update({tag: 'gmResult', narration: j.narration || '（天は沈黙している）', deltas: j.deltas || [], action: j.action || null}, state);
         done = true;
       } catch (e) { /* 3) offline fallback */ }
     }
