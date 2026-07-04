@@ -142,6 +142,66 @@ private def genericRoles : List String := [
   ""
 ]
 
+/-! ## Button-tag audit
+
+Every interactive view button dispatches a `{tag: "X"}` message. If no
+handler exists — an `update` match arm `| "X" =>`, or a `msg.tag === 'X'`
+/ `/^X…/.exec(msg.tag)` interception in runtime.js — clicking it silently
+does nothing (the recurring "dead button" bug). Catch it at boot, same
+spirit as the asset audit: no button ships without a handler. -/
+
+private def tagChar (c : Char) : Bool := c.isAlphanum || c == '_'
+
+/-- First quoted token (single or double quote) after skipping leading
+whitespace / `:` / `=`. `none` if the next non-space char isn't a quote. -/
+private def firstQuotedTok (s : String) : Option String :=
+  let cs := s.toList.dropWhile (fun c => c == ' ' || c == '\t' || c == ':' || c == '=')
+  match cs with
+  | '"'  :: rest => some (rest.takeWhile (· != '"')).asString
+  | '\'' :: rest => some (rest.takeWhile (· != '\'')).asString
+  | _ => none
+
+/-- First quoted token after each occurrence of `marker`. -/
+private def collectQuotedAfter (src marker : String) : List String := Id.run do
+  let mut out : Std.HashSet String := {}
+  for part in (src.splitOn marker).tail! do
+    match firstQuotedTok part with
+    | some t => if !t.isEmpty then out := out.insert t
+    | none => pure ()
+  return out.toList
+
+/-- Alnum(+_) prefix right after each `/^` — a runtime.js interception
+regex like `/^saveSlot([123])$/` → the prefix `saveSlot`. -/
+private def collectRegexPrefixes (src : String) : List String := Id.run do
+  let mut out : Array String := #[]
+  for part in (src.splitOn "/^").tail! do
+    let p := (part.toList.takeWhile tagChar).asString
+    if !p.isEmpty then out := out.push p
+  return out.toList
+
+/-- Warn (loudly) about any view button whose `{tag:"…"}` has no handler.
+`gameSrc` = the game `.leanjs` sources, `runtimeSrc` = runtime.js. -/
+def auditButtons (gameSrc runtimeSrc : String) (manifestPath : String) : IO Unit := do
+  let dispatched := collectQuotedAfter gameSrc "{tag:"      -- view buttons
+  let armTags    := collectQuotedAfter gameSrc "| "         -- update `| "X" =>`
+  let msgTags    := collectQuotedAfter runtimeSrc "msg.tag =" -- `msg.tag === 'X'`
+  let prefixes   := collectRegexPrefixes runtimeSrc          -- `/^saveSlot…/`
+  let mut handled : Std.HashSet String := {}
+  for t in armTags ++ msgTags do handled := handled.insert t
+  let mut missing : Array String := #[]
+  for t in dispatched do
+    if !(handled.contains t || prefixes.any (fun p => t.startsWith p)) then
+      missing := missing.push t
+  if missing.isEmpty then
+    IO.eprintln s!"chuhan: button audit OK — {dispatched.length} tags, all handled"
+  else
+    IO.eprintln "chuhan: ⚠ DEAD BUTTONS — these {tag} have NO handler (clicks do nothing):"
+    for t in missing do IO.eprintln s!"  DEAD_BUTTON: {t}"
+    IO.FS.writeFile manifestPath
+      ("# DEAD_BUTTON: a view button dispatches {tag:\"…\"} with no update arm\n\
+        # or runtime.js msg.tag interception. Add a handler or fix the tag.\n"
+        ++ String.intercalate "\n" (missing.toList.map (fun t => s!"DEAD_BUTTON: {t}")) ++ "\n")
+
 def auditAssets (gameSrc : String) (pageSrc : String) (assetDir : String)
     (manifestPath : String) : IO Unit := do
   -- 1) Asset existence: every /assets/X.ext in the sources resolves on disk.
@@ -822,6 +882,7 @@ def serveMain (args : List String) : IO Unit := do
                    then IO.FS.readFile runtimePath else pure ""
   auditAssets gameSrc (pageSrc ++ "\n" ++ runtimeSrc) (base ++ "/assets")
               (base ++ "/MISSING_ASSETS.txt")
+  auditButtons gameSrc runtimeSrc (base ++ "/MISSING_HANDLERS.txt")
   /- Save-slot DB: create the table once so the first save just works.
      SQLite is embedded, so this is a local file — no service to run. -/
   initSaveDb

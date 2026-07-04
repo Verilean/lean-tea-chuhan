@@ -1060,14 +1060,15 @@ function ensureConcludeOverlay() {
     "<button id='concludeCont' class='btn btn-primary'>この後を続ける</button>" +
     "<button id='concludeTitleBtn' class='btn btn-ghost'>タイトルへ</button></div></div>";
   document.body.appendChild(ov);
-  ov.querySelector('#concludeCont').addEventListener('click', () => {
-    ov.style.display = 'none';
-    state = update({tag: 'llmEnd'}, state); persist(state); render();
-  });
-  ov.querySelector('#concludeTitleBtn').addEventListener('click', () => {
-    ov.style.display = 'none';
-    state = update({tag: 'toTitle'}, state); persist(state); render();
-  });
+  const leave = (tag) => {
+    ov.style.display = 'none';               // always hide first, so we never trap the UI
+    try { state = update({tag}, state); persist(state); render(); }
+    catch (e) { try { render(); } catch (_) {} }
+  };
+  ov.querySelector('#concludeCont').addEventListener('click', () => leave('llmEnd'));
+  ov.querySelector('#concludeTitleBtn').addEventListener('click', () => leave('toTitle'));
+  // Backdrop click = escape hatch (never get stuck behind the overlay).
+  ov.addEventListener('click', (e) => { if (e.target === ov) ov.style.display = 'none'; });
   return ov;
 }
 
