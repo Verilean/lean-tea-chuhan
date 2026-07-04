@@ -717,10 +717,32 @@ def handler (cfg : LeanTea.Llm.Openai.Config)
   | "/favicon.ico", _ =>
     return { status := 204, headers := #[], body := .empty }
   | path, _ =>
+    /- Serve locally-cached ML model files (diffusers.js SD, etc.) from
+       ChuHan/models/. diffusers.js's setModelCacheDir points here, so the
+       browser loads the ~2.5GB model from localhost (fast) instead of the
+       HF CDN (slow), falling back to HF only for missing files. Subdirs
+       allowed; `..` blocked. -/
+    if path.startsWith "/models/" then
+      let rel := (path.drop "/models/".length).toString
+      if (rel.splitOn "..").length > 1 then return Response.notFound
+      else
+        let base ← chuhanDir
+        let full := base ++ "/models/" ++ rel
+        if ← System.FilePath.pathExists full then
+          let bytes ← IO.FS.readBinFile full
+          let mime := if rel.endsWith ".json" then "application/json"
+                      else if rel.endsWith ".txt" then "text/plain; charset=utf-8"
+                      else "application/octet-stream"
+          return {
+            status := 200,
+            headers := #[("content-type", mime), ("cache-control", "max-age=604800")],
+            body := bytes
+          }
+        else return Response.notFound
     /- Serve PNG / WEBP image assets from examples/ChuHan/assets/.
        Only allow alnum + underscore + dot + hyphen + slash in the
        URL path to avoid directory traversal. -/
-    if path.startsWith "/assets/" then
+    else if path.startsWith "/assets/" then
       let rel := (path.drop "/assets/".length).toString
       let bad := rel.contains '.' && (rel.splitOn "..").length > 1
       if bad || rel.contains '/' then return Response.notFound

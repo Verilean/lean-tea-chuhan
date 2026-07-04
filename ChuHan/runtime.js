@@ -440,9 +440,14 @@ async function loadImgGen() {
   if (imggen.ready || imggen.loading) return false;
   if (!navigator.gpu) { imgStatus('この端末は WebGPU 非対応（絵はスキップ）'); return false; }
   imggen.loading = true;
-  imgStatus('画家（SD-Turbo）を読み込み中…（初回のみ大きめDL・以後キャッシュ）');
+  imgStatus('画家を読み込み中…（サーバの /models から。初回のみ）');
   try {
     if (!imggen.mod) imggen.mod = await import('https://esm.run/@aislamov/diffusers.js');
+    // Point diffusers.js at our locally-served model cache. It builds
+    // `${base}/${repo}/${path}` and tries that first, falling back to the
+    // HF CDN only for files we haven't mirrored. So the ~2.5GB SD model
+    // loads from localhost (fast) instead of the slow HF single-stream.
+    if (imggen.mod.setModelCacheDir) imggen.mod.setModelCacheDir(location.origin + '/models');
     imggen.pipe = await imggen.mod.DiffusionPipeline.fromPretrained(IMG_MODEL, {
       progressCallback: (p) => imgStatus('画家 読み込み: ' + (p && p.status ? p.status : '…'))
     });
@@ -905,7 +910,10 @@ function wireSandboxSim() {
 // (mlc-ai/web-llm#810 — needs an MLC WebGPU compile). We default to a
 // ready prebuilt model; swap WEBLLM_MODEL to a Gemma-4 build once it's
 // available (or self-compiled + hosted) — nothing else changes.
-const WEBLLM_MODEL = 'gemma-2-2b-it-q4f16_1-MLC';   // ← swap for gemma4 when built
+// Qwen2.5-3B: ~3B, strong Japanese/Chinese (fits this Chu-Han setting far
+// better than the 2B Gemma) and in WebLLM's prebuilt list. ~2GB first DL,
+// then cached in the browser. Swap here for a 7B if you want more.
+const WEBLLM_MODEL = 'Qwen2.5-3B-Instruct-q4f16_1-MLC';
 const GM_SYSTEM =
   'あなたは紀元前206年、楚漢戦争サンドボックスのゲームマスター。プレイヤーの自由な行動を読み、' +
   '世界の反応を即興で描き、盤面の変化を返す。人物の性格（項羽=誇り高い武人、韓信=野心家、' +
