@@ -916,9 +916,14 @@ const GM_SYSTEM =
 
 let webllm = { engine: null, mod: null, ready: false, loading: false };
 
+// Show WebLLM status on BOTH the sandbox (#gmAiStatus) and the story
+// chat/resolve screens (#llmAiStatus) — otherwise the ~1GB download looks
+// frozen wherever the matching element isn't present.
 function gmAiStatus(msg) {
-  const s = document.getElementById('gmAiStatus');
-  if (s) s.textContent = msg;
+  const a = document.getElementById('gmAiStatus');
+  if (a) a.textContent = msg;
+  const b = document.getElementById('llmAiStatus');
+  if (b) b.textContent = msg;
 }
 
 async function loadBrowserAI() {
@@ -993,19 +998,19 @@ async function runBrowserResolve(action) {
 // chat / resolve screens, so the in-browser model can be loaded there
 // too (not only from the sandbox).
 function wireLlmLoadButton() {
-  const st = document.getElementById('llmAiStatus');
-  if (st) st.textContent = webllm.ready ? 'ブラウザAI 起動済み' : (webllm.loading ? '起動中…' : '（サーバ未接続ならこれを起動）');
   const b = document.getElementById('llmLoadAI');
-  if (!b) return;
-  if (webllm.ready) { b.style.display = 'none'; return; }
-  if (b.dataset.wired) return;
+  const st = document.getElementById('llmAiStatus');
+  if (webllm.ready) {
+    if (st) st.textContent = 'ブラウザAI 起動済み';
+    if (b) b.style.display = 'none';
+    return;
+  }
+  // Hint only when idle — don't clobber live download progress (which
+  // gmAiStatus writes here too).
+  if (st && !webllm.loading && !st.textContent) st.textContent = '会話するには → 起動（初回 ~1GB・WebGPU）';
+  if (!b || b.dataset.wired) return;
   b.dataset.wired = '1';
-  b.addEventListener('click', async () => {
-    if (st) st.textContent = '起動中…（初回 ~1GB・WebGPU）';
-    await loadBrowserAI();
-    if (st) st.textContent = webllm.ready ? 'ブラウザAI 起動済み' : '起動失敗（WebGPU 非対応?）';
-    if (webllm.ready) b.style.display = 'none';
-  });
+  b.addEventListener('click', () => { loadBrowserAI(); });  // progress shown via gmAiStatus
 }
 
 // ─── Sandbox game master wiring. Prefers the in-browser AI when it's
