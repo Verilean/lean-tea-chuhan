@@ -179,8 +179,39 @@ private def collectRegexPrefixes (src : String) : List String := Id.run do
     if !p.isEmpty then out := out.push p
   return out.toList
 
-/-- Warn (loudly) about any view button whose `{tag:"…"}` has no handler.
-`gameSrc` = the game `.leanjs` sources, `runtimeSrc` = runtime.js. -/
+/-- The substring after the first `marker`, up to (excluding) `stop`. -/
+private def firstAfter (s marker : String) (stop : Char) : Option String :=
+  match (s.splitOn marker).tail! with
+  | part :: _ => some (part.toList.takeWhile (· != stop)).asString
+  | [] => none
+
+/-- Raw `<button …>` literals in the source (as opposed to the `button()`
+helper, which emits its own `data-msg`). Each raw button is only alive if
+it either carries `data-msg` (→ the tag audit covers it) or has an
+`id='X'` that runtime.js actually wires (`getElementById`/`#X`). A raw
+button with neither is dead on arrival — exactly the `concludeChat` bug.
+Returns the ids (or a snippet) of the dead ones. -/
+private def deadRawButtons (gameSrc runtimeSrc : String) : List String := Id.run do
+  let mut dead : Array String := #[]
+  for part in (gameSrc.splitOn "<button").tail! do
+    let chunk := (part.toList.takeWhile (· != '>')).asString
+    if (chunk.splitOn "data-msg").length > 1 then continue  -- helper/data-msg button
+    let id := (firstAfter chunk "id='" '\'').orElse (fun _ => firstAfter chunk "id=\"" '"')
+    match id with
+    | none => dead := dead.push "(no id, no data-msg)"
+    | some x =>
+      -- Must be an actual id lookup — NOT just the string appearing somewhere
+      -- (e.g. a `msg.tag === 'x'` interception, which needs data-msg, not id).
+      let wired := (runtimeSrc.splitOn s!"getElementById('{x}')").length > 1
+                || (runtimeSrc.splitOn s!"getElementById(\"{x}\")").length > 1
+                || (runtimeSrc.splitOn s!"#{x}").length > 1
+      if !wired then dead := dead.push x
+  return dead.toList
+
+/-- Warn (loudly) about any view button that can't respond to a click:
+either a `{tag:"X"}` with no handler, or a raw `<button>` that is neither
+`data-msg`-dispatched nor id-wired in runtime.js. `gameSrc` = the game
+`.leanjs` sources, `runtimeSrc` = runtime.js. -/
 def auditButtons (gameSrc runtimeSrc : String) (manifestPath : String) : IO Unit := do
   let dispatched := collectQuotedAfter gameSrc "{tag:"      -- view buttons
   let armTags    := collectQuotedAfter gameSrc "| "         -- update `| "X" =>`
@@ -188,19 +219,23 @@ def auditButtons (gameSrc runtimeSrc : String) (manifestPath : String) : IO Unit
   let prefixes   := collectRegexPrefixes runtimeSrc          -- `/^saveSlot…/`
   let mut handled : Std.HashSet String := {}
   for t in armTags ++ msgTags do handled := handled.insert t
-  let mut missing : Array String := #[]
+  let mut lines : Array String := #[]
   for t in dispatched do
     if !(handled.contains t || prefixes.any (fun p => t.startsWith p)) then
-      missing := missing.push t
-  if missing.isEmpty then
-    IO.eprintln s!"chuhan: button audit OK — {dispatched.length} tags, all handled"
+      lines := lines.push s!"DEAD_BUTTON: {t}   (no update arm / msg.tag interception)"
+  for x in deadRawButtons gameSrc runtimeSrc do
+    lines := lines.push s!"DEAD_RAW_BUTTON: {x}   (raw <button> with no data-msg and no wired id)"
+  if lines.isEmpty then
+    IO.eprintln s!"chuhan: button audit OK — {dispatched.length} tags + raw buttons, all live"
   else
-    IO.eprintln "chuhan: ⚠ DEAD BUTTONS — these {tag} have NO handler (clicks do nothing):"
-    for t in missing do IO.eprintln s!"  DEAD_BUTTON: {t}"
+    IO.eprintln "chuhan: ⚠ DEAD BUTTONS (clicking these does nothing):"
+    for l in lines do IO.eprintln s!"  {l}"
     IO.FS.writeFile manifestPath
-      ("# DEAD_BUTTON: a view button dispatches {tag:\"…\"} with no update arm\n\
-        # or runtime.js msg.tag interception. Add a handler or fix the tag.\n"
-        ++ String.intercalate "\n" (missing.toList.map (fun t => s!"DEAD_BUTTON: {t}")) ++ "\n")
+      ("# A button that can't respond to a click:\n\
+        #   DEAD_BUTTON     — {tag:\"X\"} with no update arm / msg.tag interception\n\
+        #   DEAD_RAW_BUTTON — raw <button> with no data-msg AND no id wired in runtime.js\n\
+        # Fix: use the button({tag}) helper + a handler, or wire the id.\n"
+        ++ String.intercalate "\n" lines.toList ++ "\n")
 
 def auditAssets (gameSrc : String) (pageSrc : String) (assetDir : String)
     (manifestPath : String) : IO Unit := do
