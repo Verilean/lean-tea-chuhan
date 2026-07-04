@@ -971,13 +971,23 @@ async function runBrowserGM(action, world) {
 // In-browser (WebLLM) NPC chat — same role as /api/ask, no server needed.
 async function runBrowserChat(npcName, history, message) {
   const sys = 'あなたは楚漢戦争（紀元前209〜202年の中国）の登場人物「' + (npcName || '登場人物') + '」です。'
-    + 'その人物の性格・立場・話し方で、日本語で簡潔に（2〜4文）応答してください。'
+    + 'その人物として、日本語で必ず1〜3文、自然に応答してください（空の返答は禁止）。'
     + '時代や人物像を外さず、メタ発言や現代語の解説はしないこと。';
   const msgs = [{ role: 'system', content: sys }];
-  for (const m of (history || [])) msgs.push({ role: m.role === 'user' ? 'user' : 'assistant', content: m.text });
+  // Drop empty / placeholder turns (they poison the context and make the
+  // small model emit more empties) and keep only the recent history.
+  const recent = (history || [])
+    .filter(m => m && m.text && m.text.trim() && m.text !== '(空の応答)')
+    .slice(-8);
+  for (const m of recent) msgs.push({ role: m.role === 'user' ? 'user' : 'assistant', content: m.text });
   msgs.push({ role: 'user', content: message });
-  const r = await webllm.engine.chat.completions.create({ messages: msgs, temperature: 0.8, max_tokens: 220 });
-  return (r.choices[0].message.content || '').trim();
+  let out = '';
+  for (let i = 0; i < 2 && !out; i++) {
+    const r = await webllm.engine.chat.completions.create({ messages: msgs, temperature: 0.9, max_tokens: 200 });
+    out = ((r.choices && r.choices[0] && r.choices[0].message && r.choices[0].message.content) || '').trim();
+  }
+  // Never return empty — a soft in-character line beats "(空の応答)".
+  return out || (npcName + 'は、ふと言葉を呑んだ。……何かを言いかけて、やめたようだ。');
 }
 
 // In-browser (WebLLM) TRPG judgement — same shape as /api/resolve.
@@ -1125,7 +1135,20 @@ function wireChatHandlers() {
         done = true;
       } catch (e) { /* fall through */ }
     }
-    if (!done) state = update({tag: 'llmError', text: '応答を得られません。「🧠 ブラウザAI起動」を押すか、サーバに LLM を接続してください。'}, state);
+    // 3) no LLM yet → auto-load the in-browser model (the send is the
+    //    player's consent), show progress, then retry — don't just error.
+    if (!done && !webllm.ready && navigator.gpu) {
+      await loadBrowserAI();
+      if (webllm.ready) {
+        try {
+          const reply = await runBrowserChat(npcName, hist, text);
+          state = update({tag: 'llmReply', text: reply || '(空の応答)'}, state);
+          done = true;
+        } catch (e) { /* fall through */ }
+      }
+    }
+    if (!done) state = update({tag: 'llmError',
+      text: (navigator.gpu ? 'AI モデルを読み込めませんでした。' : 'この端末は WebGPU 非対応です。') + ' サーバに LLM を接続すれば会話できます。'}, state);
     persist(state);
     render();
   };
@@ -1178,7 +1201,19 @@ function wireResolveHandlers() {
         done = true;
       } catch (e) { /* fall through */ }
     }
-    if (!done) state = update({tag: 'resolveError', text: '判定を得られません。「🧠 ブラウザAI起動」を押すか、サーバに LLM を接続してください。'}, state);
+    // 3) auto-load the in-browser model on first use, then retry.
+    if (!done && !webllm.ready && navigator.gpu) {
+      await loadBrowserAI();
+      if (webllm.ready) {
+        try {
+          const v = await runBrowserResolve(text);
+          state = update({tag: 'resolveResult', outcome: v.outcome, reasoning: v.reasoning || '(no reasoning)'}, state);
+          done = true;
+        } catch (e) { /* fall through */ }
+      }
+    }
+    if (!done) state = update({tag: 'resolveError',
+      text: (navigator.gpu ? 'AI モデルを読み込めませんでした。' : 'この端末は WebGPU 非対応です。') + ' サーバに LLM を接続すれば判定できます。'}, state);
     persist(state);
     render();
   };
