@@ -1358,7 +1358,12 @@ def viewSandbox(state) :=
     "<div>",
     pend,
     "<div style='margin-bottom:10px'>", controls, "</div>",
-    panel("mini", "動静", sbLog(w.log)),
+    -- 動静ログは通常フローのカードで(旧 .panel-mini は position:absolute で
+    -- 他の要素に被さっていた)。
+    "<div style='background:#14110c;border:1px solid #3a2f1f;border-radius:8px;padding:10px'>",
+    "<div style='font-size:12px;color:#9a8d73;margin-bottom:4px'>動静</div>",
+    sbLog(w.log),
+    "</div>",
     "<details style='margin-top:8px'><summary style='cursor:pointer;color:#8a7d63;font-size:12px'>🎨 この情景を描く（実験的・WebGPU）</summary>",
     "<div style='display:flex;gap:8px;align-items:center;margin-top:6px;font-size:12px;color:#9a8d73;flex-wrap:wrap'>",
     "<button id='imgGen' class='btn btn-ghost' style='font-size:12px'>描く</button><span id='imgStatus'></span></div>",

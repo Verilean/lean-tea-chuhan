@@ -416,8 +416,11 @@ function wireAction() {
 // TUNE ON A REAL WEBGPU BROWSER: the exact ONNX repo id and diffusers.js
 // run() params below are the two things most likely to need adjusting;
 // they're isolated as constants for that reason.
-const IMG_MODEL = 'aislamov/sd-turbo-onnx';   // ← SD-Turbo ONNX for diffusers.js
-const IMG_STEPS = 1;                          // SD-Turbo is 1-step
+// The previous repo (aislamov/sd-turbo-onnx) 404/401s on HuggingFace.
+// Use diffusers.js's documented demo ONNX model. NOTE: still best-effort
+// / unverified on a real WebGPU browser — image gen is an optional flourish.
+const IMG_MODEL = 'aislamov/stable-diffusion-2-1-base-onnx';
+const IMG_STEPS = 20;                         // SD 2.1 base is multi-step
 let imggen = { mod: null, pipe: null, ready: false, loading: false, busy: false };
 
 function imgStatus(msg) {
@@ -445,7 +448,11 @@ async function loadImgGen() {
     imgStatus('画家 起動済み');
     return true;
   } catch (e) {
-    imgStatus('画家 起動失敗: ' + (e && e.message ? e.message : e) + '（絵はスキップ、進行は継続）');
+    const em = (e && e.message ? e.message : String(e));
+    const calm = /401|403|404|not found|status/i.test(em)
+      ? '画像生成モデルを読み込めませんでした（実験的機能・環境により未対応）。進行には影響しません。'
+      : '画像生成に失敗しました（' + em.slice(0, 60) + '）。進行には影響しません。';
+    imgStatus(calm);
     return false;
   } finally {
     imggen.loading = false;
@@ -462,7 +469,7 @@ async function genScene() {
     const images = await imggen.pipe.run({
       prompt: scenePrompt(),
       numInferenceSteps: IMG_STEPS,
-      guidanceScale: 0,
+      guidanceScale: 7.5,
       progressCallback: (info) => { if (info && info.step != null) imgStatus('描画 ' + info.step + '/' + IMG_STEPS); }
     });
     const img = Array.isArray(images) ? images[0] : images;
