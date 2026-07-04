@@ -624,12 +624,32 @@ async function genScene() {
 // narrates the next beat from the running history; the scene image repaints.
 let storyImprov = { bg: null, history: [], seeded: false, busy: false };
 
+// 史記(公有原文断片)を寄る辺に。/assets/shiji.json を一度だけ読み、場面に
+// 合う断片を選んで LLM プロンプトへ差し込み、地の文・台詞を史実へ寄せる。
+let shiji = { list: null, loading: null };
+async function loadShiji() {
+  if (shiji.list) return;
+  if (!shiji.loading) shiji.loading = fetch('/assets/shiji.json')
+    .then(r => r.json()).then(j => { shiji.list = j.fragments || []; })
+    .catch(() => { shiji.list = []; });
+  await shiji.loading;
+}
+function shijiFor(charId, text) {
+  if (!shiji.list || !shiji.list.length) return null;
+  const cand = shiji.list.filter(f => !f.chars || f.chars.indexOf(charId) >= 0);
+  const pool = cand.length ? cand : shiji.list;
+  const hit = pool.find(f => f.match && new RegExp(f.match).test(text || ''));
+  return hit || pool[Math.floor(Math.random() * pool.length)];
+}
+
 // Continue the story: given the running history + the player's action, write
 // the next narrative beat (地の文), keeping character + period voice.
 async function runBrowserStoryContinue(ctx, action) {
+  const frag = shijiFor(ctx.charId, (ctx.history || []).map(h => h.content).join(' ') + ' ' + action);
   const sys = 'あなたは楚漢戦争(紀元前3世紀の中国)を舞台にした対話型小説の語り手。' +
     'プレイヤーは' + (ctx.char || '主人公') + '。その行動・台詞を受け、物語を次の一段へ進める。' +
     '人物の性格と史実の空気を守り、地の文で描く。' + (ctx.persona ? ('関わる人物: ' + ctx.persona + '。') : '') +
+    (frag ? ('史記の原文を寄る辺にせよ:「' + frag.han + '」――' + frag.gloss + ' この史実と筆致に沿わせ、大きく逸脱しない。') : '') +
     '厳守: 日本語で2〜3文・60〜130字。情景と人物の反応を描き、続きを促す余韻で締める。' +
     '説明・箇条書き・JSON・同じ表現の繰り返しは禁止。';
   const msgs = [{ role: 'system', content: sys }];
@@ -680,6 +700,7 @@ function wireStoryImprov() {
   if (!storyImprov.seeded) {                        // entering improv: seed history from the current line
     storyImprov.history = [{ role: 'assistant', content: state.improv.text || '' }];
     storyImprov.seeded = true;
+    loadShiji();                                    // pull the 史記 fragments for grounding
   }
   const input = document.getElementById('improvGo');
   const go = document.getElementById('improvGoBtn');
@@ -688,7 +709,7 @@ function wireStoryImprov() {
   go.dataset.wired = '1';
   const step = (typeof stepAt === 'function') ? stepAt(sceneOf(state.sceneId), state.beat) : {};
   const who = step.who || '';
-  const ctx = { char: IMPROV_CHAR_NAME[state.char] || state.char, persona: NPC_PERSONA[IMPROV_PERSONA_BY_NAME[who]] || '' };
+  const ctx = { char: IMPROV_CHAR_NAME[state.char] || state.char, charId: state.char, persona: NPC_PERSONA[IMPROV_PERSONA_BY_NAME[who]] || '' };
   const step2 = async () => {
     const text = input.value.trim();
     if (!text || storyImprov.busy) return;
