@@ -607,8 +607,8 @@ async function genScene() {
 }
 
 // render() rebuilds #stage, so the freshly-created #sbScene canvas is blank
-// after every game action — re-draw the last generated image and re-open
-// the panel so the picture doesn't vanish the moment anything happens.
+// after every game action — re-draw the last generated image so there's no
+// blank gap while a fresh scene image is (re)painting.
 function restoreScene() {
   if (!imggen.lastImg) return;
   const cv = document.getElementById('sbScene');
@@ -617,6 +617,13 @@ function restoreScene() {
   cv.getContext('2d').putImageData(imggen.lastImg, 0, 0);
   cv.style.display = 'block';
   const det = cv.closest('details'); if (det) det.open = true;
+}
+
+// The illustration should follow the story: when the scene advances, repaint
+// it to match — in the background, and only once the painter is loaded (the
+// player opted in by generating at least once). This is the TRPG beat.
+function refreshScene() {
+  if (imggen.ready && !imggen.busy) genScene();   // fire-and-forget; genScene reads the new world
 }
 
 function wireImgGen() {
@@ -1196,6 +1203,7 @@ async function advanceWithGM() {
   const narr = await runBrowserGMScene(state.world, sbSnapshot());
   if (narr) { state = update({ tag: 'gmResult', narration: narr, deltas: [], action: null }, state); persist(state); render(); }
   gmAiStatus('AI 軍師 起動済み（行動を書けば即興で応答）');
+  refreshScene();   // repaint the illustration to match the new scene
 }
 
 // Short personas so the small model actually stays in character.
@@ -1371,6 +1379,7 @@ function wireGmHandlers() {
       state = update({tag: 'gmSubmit', text: text}, state);       // echo ▶ 劉邦: …
       state = update({tag: 'expedition', target: expTarget}, state);  // 兵站モデル起動
       persist(state); render();
+      refreshScene();   // the frontier expedition is a whole new scene — repaint
       return;
     }
     input.value = '';
@@ -1401,6 +1410,7 @@ function wireGmHandlers() {
     }
     if (!done) state = update({tag: 'gmError', text: ''}, state);
     persist(state); render();
+    refreshScene();   // repaint to match what just unfolded
   };
   send.addEventListener('click', doSend);
   input.addEventListener('keydown', (e) => {

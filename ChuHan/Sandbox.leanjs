@@ -99,8 +99,18 @@ def sbSceneEn(last) :=
   else if reTest(last, "呂雉|書") == 1 then "a cold empress reading a letter by candlelight"
   else "an ancient Chinese war camp, banners"
 
+-- 今この場面の"主役"を英語で。差し迫る事態があればそれを優先、
+-- 無ければ直近ログから情景を拾う。→ シーンが進むたび絵が場面に即す。
+def sbSceneSubject(world) :=
+  let c := world.court;
+  if c.threat != null then
+    (if c.threat.kind == "retainer" then "a powerful general brooding alone in a war tent, plotting rebellion, tense"
+     else if c.threat.kind == "supply" then "starving soldiers beside empty grain carts, gaunt faces, desperation"
+     else "enemy armies massing on the frontier at dusk, war banners, dread")
+  else sbSceneEn(sbLastLog(world))
+
 def sbScenePrompt(world) :=
-  let scene := sbSceneEn(sbLastLog(world));
+  let scene := sbSceneSubject(world);
   let season := sbSeasonEn(world.season);
   sconcat("sumi-e ink wash painting, ",
   sconcat(scene,
