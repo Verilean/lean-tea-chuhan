@@ -1181,6 +1181,16 @@ function sbSnapshot() {
 function inferGmAction(text) {
   const w = state.world;
   if (!w || !w.court) return null;
+  // Build a monument → leave a mark on the world map (the "ピラミッドをつくる" beat).
+  const bm = text.match(/(ピラミッド|万里の長城|長城|宮殿|城郭|城|要塞|大仏|寺院|寺|廟|港|運河|大運河|塔|灯台|陵|霊廟|新都|都)/);
+  if (bm && /(築|建て|建設|造|作|興|据|営|普請)/.test(text)) {
+    const icons = { 'ピラミッド':'▲','万里の長城':'🧱','長城':'🧱','宮殿':'🏯','城郭':'🏯','城':'🏯','要塞':'🏯','大仏':'🗿','寺院':'⛩','寺':'⛩','廟':'⛩','霊廟':'⛩','港':'⚓','運河':'🌊','大運河':'🌊','塔':'🗼','灯台':'🗼','陵':'⛰','新都':'🏙','都':'🏙' };
+    const ja = bm[1];
+    const fid = (typeof sbFrontierNamed === 'function') ? sbFrontierNamed(text) : '';
+    const reg = (w.regions || []).find(r => text.includes(r.ja));
+    const target = fid || (reg ? reg.id : w.loc);
+    return { type: 'landmark', ja: ja, icon: icons[ja] || '◆', target: target };
+  }
   const rs = (w.court.retainers || []).filter(r => r.alive);
   const who = rs.map(r => r.name).find(n => text.includes(n)) || '';
   const punish  = /(疑|削ぐ|兵を奪|奪っ|罷免|抑え|冷遇|警戒|遠ざけ|粛清|処断|誅|斬|殺)/.test(text);

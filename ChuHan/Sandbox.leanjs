@@ -11,16 +11,17 @@
 
 extern js "(n) => String(n)" numStr
 
--- 楚漢の主要地域。x/y は 0..100 のマップ座標。
+-- 楚漢の主要地域。x/y はユーラシア世界図(0..160 × 0..90)上の座標で、
+-- 中国は中央〜東寄りに固まる。周りに遠征先(sbFrontiers)が広がる。
 def sbRegions := [
-  {id: "guanzhong", ja: "關中", x: 34, y: 42, owner: "qin",   ctrl: 60},
-  {id: "xianyang",  ja: "咸陽", x: 40, y: 36, owner: "qin",   ctrl: 50},
-  {id: "hanzhong",  ja: "漢中", x: 30, y: 56, owner: "han",   ctrl: 82},
-  {id: "bashu",     ja: "巴蜀", x: 20, y: 70, owner: "han",   ctrl: 55},
-  {id: "pengcheng", ja: "彭城", x: 66, y: 48, owner: "chu",   ctrl: 85},
-  {id: "wei",       ja: "魏",   x: 54, y: 42, owner: "lords", ctrl: 50},
-  {id: "zhao",      ja: "趙",   x: 60, y: 26, owner: "lords", ctrl: 55},
-  {id: "qi",        ja: "齊",   x: 80, y: 34, owner: "lords", ctrl: 60}
+  {id: "guanzhong", ja: "關中", x: 100, y: 46, owner: "qin",   ctrl: 60},
+  {id: "xianyang",  ja: "咸陽", x: 106, y: 41, owner: "qin",   ctrl: 50},
+  {id: "hanzhong",  ja: "漢中", x: 97,  y: 54, owner: "han",   ctrl: 82},
+  {id: "bashu",     ja: "巴蜀", x: 90,  y: 61, owner: "han",   ctrl: 55},
+  {id: "pengcheng", ja: "彭城", x: 121, y: 48, owner: "chu",   ctrl: 85},
+  {id: "wei",       ja: "魏",   x: 112, y: 44, owner: "lords", ctrl: 50},
+  {id: "zhao",      ja: "趙",   x: 114, y: 34, owner: "lords", ctrl: 55},
+  {id: "qi",        ja: "齊",   x: 129, y: 40, owner: "lords", ctrl: 60}
 ]
 
 def sbColor(owner) :=
@@ -458,12 +459,12 @@ def initRetainers(anchor) :=
 -- (court は world を貫通するので、遠征の状態もここに載せて再スレッドを避ける)
 def initCourt(anchor) :=
   {retainers: initRetainers(anchor), drama: null, purges: 0,
-   supply: 60, fame: 0, doom: null, threat: null}
+   supply: 60, fame: 0, doom: null, threat: null, landmarks: []}
 
 -- court の兵糧を d だけ増減(0 未満にはしない)。
 def sbCourtGainSupply(c, d) :=
   {retainers: c.retainers, drama: c.drama, purges: c.purges,
-   supply: maxI(0, c.supply + d), fame: c.fame, doom: c.doom, threat: c.threat}
+   supply: maxI(0, c.supply + d), fame: c.fame, doom: c.doom, threat: c.threat, landmarks: c.landmarks}
 
 -- 最も"危うい"功臣の index(野心+兵力-忠誠 が最大)。無ければ -1。
 def sbDangerIdx(rs, i, bestScore, bestI) :=
@@ -497,7 +498,7 @@ def sbCourtTick(court, world) :=
                     else (r.ambition + r.troops - r.loyalty) > 55 && (rngInt() % 3 == 0);
         if fire
         then {retainers: rs, drama: {who: r.name, idx: di, kind: kind}, purges: court.purges,
-              supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat}
+              supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat, landmarks: court.landmarks}
         else court))
 
 -- 全存命将の忠誠を d だけ動かす(粛清の連鎖=兎死狗烹に使う)。
@@ -526,19 +527,19 @@ def sbResolveRebellion(world, choice) :=
          arrPush(world.log, sconcat("⚔ 迎え撃った。", sconcat(r.name, "を討ち取り、乱を鎮めた。だが残る将の背にも、冷たいものが走る。"))),
          0, world.who,
          {retainers: sbLoyaltyAll(arrSet(rs, idx, {name: r.name, loyalty: 0, ambition: 0, troops: 0, alive: false}), 0 - 8),
-          drama: null, purges: court.purges, supply: court.supply, fame: court.fame + 40, doom: court.doom, threat: court.threat})
+          drama: null, purges: court.purges, supply: court.supply, fame: court.fame + 40, doom: court.doom, threat: court.threat, landmarks: court.landmarks})
      else
        sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
          arrPush(world.log, sconcat("⚔ ", sconcat(r.name, "の反乱軍に敗れた。天下を共に取った刃が、いま己を貫く。"))),
          0, world.who,
-         {retainers: rs, drama: null, purges: court.purges, supply: court.supply, fame: court.fame, doom: "revolt", threat: court.threat}))
+         {retainers: rs, drama: null, purges: court.purges, supply: court.supply, fame: court.fame, doom: "revolt", threat: court.threat, landmarks: court.landmarks}))
   else
     (let r2 := {name: r.name, loyalty: 55, ambition: r.ambition, troops: r.troops, alive: true};
      let regions2 := sbAdj(world.regions, sbTopIdxOf(world.regions, pf, 0, -1, 0), 0 - 12);
      sbWorld(world.mode, world.year, world.season, world.loc, regions2,
        arrPush(world.log, sconcat("頭を垂れ、", sconcat(r.name, "の望みを容れた。乱は収まったが、主従は静かに逆しまになりつつある。"))),
        0, world.who,
-       {retainers: arrSet(rs, idx, r2), drama: null, purges: court.purges, supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat}))
+       {retainers: arrSet(rs, idx, r2), drama: null, purges: court.purges, supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat, landmarks: court.landmarks}))
 
 def sbResolveDrama(world, choice) :=
   let court := world.court;
@@ -569,7 +570,7 @@ def sbResolveDrama(world, choice) :=
      else sconcat(r.name, sconcat("を焚きつけ、", sconcat(arrGet(world.regions, ei).ja, "へ差し向けた。野心が外へ向いた――今のところは。")));
    sbWorld(world.mode, world.year, world.season, world.loc, regions2,
      arrPush(world.log, line), 0, world.who,
-     {retainers: rs2, drama: null, purges: purges2, supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat}))
+     {retainers: rs2, drama: null, purges: purges2, supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat, landmarks: court.landmarks}))
 
 -- 存命で忠誠0以下・兵力40以上の将が居れば公然の反乱(功臣の乱)。
 def sbCourtRevolt(rs, i) :=
@@ -582,16 +583,17 @@ def sbCourtRevolt(rs, i) :=
 -- ── 遠征 × 兵站 ────────────────────────────────────────────────────
 -- 破天荒(世界の果てへ)を許すが、距離・兵糧・運が現実を突きつける。
 -- dist が難度(遠いほど兵糧要求と失敗率が跳ね上がる)。
+-- 遠征先。dist=兵站距離、fx/fy=世界図(0..160×0..90)上の位置(方位×距離感)。
 def sbFrontiers := [
-  {id: "xiongnu",  name: "匈奴",           dist: 2},
-  {id: "chaoxian", name: "朝鮮",           dist: 3},
-  {id: "nanyue",   name: "南越",           dist: 3},
-  {id: "xiyu",     name: "西域",           dist: 4},
-  {id: "wa",       name: "倭（日本）",     dist: 5},
-  {id: "yuezhi",   name: "大月氏",         dist: 6},
-  {id: "shendu",   name: "身毒（印度）",   dist: 7},
-  {id: "anxi",     name: "安息（波斯）",   dist: 8},
-  {id: "daqin",    name: "大秦・エジプト", dist: 10}
+  {id: "xiongnu",  name: "匈奴",           dist: 2,  fx: 108, fy: 20},
+  {id: "chaoxian", name: "朝鮮",           dist: 3,  fx: 132, fy: 26},
+  {id: "nanyue",   name: "南越",           dist: 3,  fx: 103, fy: 72},
+  {id: "xiyu",     name: "西域",           dist: 4,  fx: 76,  fy: 40},
+  {id: "wa",       name: "倭（日本）",     dist: 5,  fx: 149, fy: 46},
+  {id: "yuezhi",   name: "大月氏",         dist: 6,  fx: 58,  fy: 28},
+  {id: "shendu",   name: "身毒（印度）",   dist: 7,  fx: 64,  fy: 70},
+  {id: "anxi",     name: "安息（波斯）",   dist: 8,  fx: 38,  fy: 44},
+  {id: "daqin",    name: "大秦・エジプト", dist: 10, fx: 13,  fy: 52}
 ]
 
 def sbFrontierAt(fs, id, i) :=
@@ -645,7 +647,7 @@ def sbCourtErode(court, d) :=
     (let r := arrGet(rs, di);
      let r2 := {name: r.name, loyalty: sbClamp(r.loyalty - d), ambition: r.ambition, troops: r.troops, alive: r.alive};
      {retainers: arrSet(rs, di, r2), drama: court.drama, purges: court.purges,
-      supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat})
+      supply: court.supply, fame: court.fame, doom: court.doom, threat: court.threat, landmarks: court.landmarks})
 
 -- 遠征の解決。強さ(支配率合計)+運-距離-兵糧不足 で階層を決める。
 -- 遠いほど本国が留守になり、被侵攻と功臣の離心を招く(overreach の代償)。
@@ -679,7 +681,7 @@ def sbExpedition(world, targetId) :=
   let exposed := (rngInt() % 12) < dist;
   let inv := if exposed then sbInvasion(regions2, world.who) else {regions: regions2, line: ""};
   let court1 := {retainers: court.retainers, drama: court.drama, purges: court.purges,
-                 supply: supply2, fame: court.fame + fameGain, doom: doom, threat: court.threat};
+                 supply: supply2, fame: court.fame + fameGain, doom: doom, threat: court.threat, landmarks: court.landmarks};
   let court2 := sbCourtErode(court1, idiv(dist, 2));
   let expLine := sbExpeditionLine(f.name, tier);
   let log2 := if inv.line == "" then arrPush(world.log, expLine)
@@ -714,7 +716,7 @@ def sbApplyGmAction(world, action) :=
            sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
              world.log, world.pending, world.who,
              {retainers: arrSet(rs, idx, {name: r.name, loyalty: sbClamp(r.loyalty + action.d), ambition: r.ambition, troops: r.troops, alive: r.alive}),
-              drama: c.drama, purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom, threat: c.threat})))
+              drama: c.drama, purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom, threat: c.threat, landmarks: c.landmarks})))
      else if action.type == "rebellion" then
        (let idx := sbRetIdxByName(rs, action.who, 0);
         if idx < 0 then world
@@ -723,7 +725,13 @@ def sbApplyGmAction(world, action) :=
            sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
              world.log, world.pending, world.who,
              {retainers: arrSet(rs, idx, {name: r.name, loyalty: 0, ambition: r.ambition, troops: maxI(40, r.troops), alive: r.alive}),
-              drama: {who: r.name, idx: idx, kind: "rebellion"}, purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom, threat: c.threat})))
+              drama: {who: r.name, idx: idx, kind: "rebellion"}, purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom, threat: c.threat, landmarks: c.landmarks})))
+     else if action.type == "landmark" then
+       (let xy := sbTargetXY(world, action.target);
+        sbWorld(world.mode, world.year, world.season, world.loc, world.regions,
+          arrPush(world.log, sconcat("🏛 ", sconcat(action.ja, "を築いた。世界に、爪痕を残す。"))),
+          world.pending, world.who,
+          sbCourtAddLandmark(c, {ja: action.ja, icon: action.icon, x: xy.x, y: xy.y - 3})))
      else world)
 
 -- ── 主人公アンカー ────────────────────────────────────────────────
@@ -951,7 +959,7 @@ def sbInvasion(regions, who) :=
 
 def sbCourtSetThreat(c, t) :=
   {retainers: c.retainers, drama: c.drama, purges: c.purges,
-   supply: c.supply, fame: c.fame, doom: c.doom, threat: t}
+   supply: c.supply, fame: c.fame, doom: c.doom, threat: t, landmarks: c.landmarks}
 
 def sbEnemyFaction(pf) := if pf == "han" then "chu" else "han"
 
@@ -991,13 +999,13 @@ def sbThreatFire(world, t) :=
   if t.kind == "supply" then
     {regions: world.regions,
      court: {retainers: sbLoyaltyAll(c.retainers, 0 - 12), drama: c.drama, purges: c.purges,
-             supply: 0, fame: c.fame, doom: c.doom, threat: null},
+             supply: 0, fame: c.fame, doom: c.doom, threat: null, landmarks: c.landmarks},
      line: "⚑ 兵糧が尽きた。軍は飢え、将卒の心が離れていく。"}
   else if t.kind == "retainer" then
     (let idx := sbRetIdxByName(c.retainers, t.who, 0);
      {regions: world.regions,
       court: {retainers: c.retainers, drama: {who: t.who, idx: idx, kind: "rebellion"},
-              purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom, threat: null},
+              purges: c.purges, supply: c.supply, fame: c.fame, doom: c.doom, threat: null, landmarks: c.landmarks},
       line: sconcat("⚑ ", sconcat(t.who, "が公然と兵を挙げた。会戦は避けられない。"))})
   else
     (let pf := sbPlayerFaction(world.who);
@@ -1109,6 +1117,64 @@ def sbBattleResolve(world) :=
 
 -- ── マップ描画(SVG 文字列)──────────────────────────────────────
 def sbRad(ctrl) := if ctrl > 70 then 7 else if ctrl > 40 then 5 else 4
+
+-- ユーラシアの陸塊(様式化・控えめ)。海は SVG 背景色。
+def sbWorldLand :=
+  sjoin([
+    "<path d='M8,40 Q26,22 60,18 Q100,12 128,20 Q150,26 150,36 Q150,46 138,48 Q150,52 140,58 Q116,66 92,64 Q64,66 44,62 Q22,58 10,50 Z' fill='#1c2a1a' fill-opacity='0.5' stroke='#2e4028' stroke-width='0.3'/>",
+    "<path d='M56,60 Q64,80 72,60 Q66,64 56,60 Z' fill='#1c2a1a' fill-opacity='0.5' stroke='#2e4028' stroke-width='0.25'/>",
+    "<circle cx='149' cy='46' r='3.4' fill='#1c2a1a' fill-opacity='0.5' stroke='#2e4028' stroke-width='0.25'/>"
+  ])
+
+-- 遠征先を世界図に配置。中央(中国)から破線の遠征路、節点はクリックで遠征。
+def sbFrontierNodes(fs, i, acc) :=
+  if i < arrLen(fs) then
+    (let f := arrGet(fs, i);
+     let node := sjoin([
+       "<line x1='108' y1='45' x2='", numStr(f.fx), "' y2='", numStr(f.fy),
+       "' stroke='#6a5a3a' stroke-width='0.25' stroke-dasharray='1.4 1.4' opacity='0.45'/>",
+       "<g data-msg=", msgAttr({tag: "expedition", target: f.id}), " style='cursor:pointer'>",
+       "<circle cx='", numStr(f.fx), "' cy='", numStr(f.fy),
+       "' r='2.4' fill='#2a2016' stroke='#c8a86a' stroke-width='0.35' stroke-dasharray='1 0.7'/>",
+       "<text x='", numStr(f.fx), "' y='", numStr(f.fy - 3.2),
+       "' font-size='2.9' text-anchor='middle' fill='#c8a86a'>", hesc(f.name), "</text>",
+       "<text x='", numStr(f.fx), "' y='", numStr(f.fy + 4.4),
+       "' font-size='2' text-anchor='middle' fill='#7a6a4a'>兵站", numStr(f.dist), "</text>",
+       "</g>"
+     ]);
+     sbFrontierNodes(fs, i + 1, sconcat(acc, node)))
+  else acc
+
+-- プレイヤーが築いた記念物(ピラミッド等)を地図に刻む。court.landmarks。
+def sbLandmarkLoop(lms, i, acc) :=
+  if i < arrLen(lms) then
+    (let m := arrGet(lms, i);
+     let node := sjoin([
+       "<text x='", numStr(m.x), "' y='", numStr(m.y),
+       "' font-size='4.6' text-anchor='middle'>", hesc(m.icon), "</text>",
+       "<text x='", numStr(m.x), "' y='", numStr(m.y + 4),
+       "' font-size='2.1' text-anchor='middle' fill='#e8d8a0'>", hesc(m.ja), "</text>"
+     ]);
+     sbLandmarkLoop(lms, i + 1, sconcat(acc, node)))
+  else acc
+
+def sbLandmarks(court) :=
+  sbLandmarkLoop((if court.landmarks then court.landmarks else []), 0, "")
+
+-- 地名(地域 or 遠征先) → 世界図座標。無ければ現在地。
+def sbTargetXY(world, target) :=
+  let ri := sbIdxOf(world.regions, target, 0);
+  let rr := arrGet(world.regions, ri);
+  if rr.id == target then {x: rr.x, y: rr.y}
+  else
+    (let f := sbFrontierAt(sbFrontiers, target, 0);
+     if f.id == target then {x: f.fx, y: f.fy}
+     else (let pr := arrGet(world.regions, sbIdxOf(world.regions, world.loc, 0)); {x: pr.x, y: pr.y}))
+
+def sbCourtAddLandmark(c, m) :=
+  {retainers: c.retainers, drama: c.drama, purges: c.purges, supply: c.supply,
+   fame: c.fame + 5, doom: c.doom, threat: c.threat,
+   landmarks: arrPush((if c.landmarks then c.landmarks else []), m)}
 
 def sbMapLoop(regions, i, acc) :=
   if i < arrLen(regions) then
@@ -1447,8 +1513,11 @@ def viewSandbox(state) :=
   let w := state.world;
   let hasDrama := w.court.drama != null;
   let map := sjoin([
-    "<svg viewBox='0 0 100 92' preserveAspectRatio='xMidYMid meet' style='width:100%;height:auto;max-height:66vh;background:#17140f;border:1px solid #4a3f2f;border-radius:8px;display:block'>",
+    "<svg viewBox='0 0 160 90' preserveAspectRatio='xMidYMid meet' style='width:100%;height:auto;max-height:66vh;background:#0b1420;border:1px solid #4a3f2f;border-radius:8px;display:block'>",
+    sbWorldLand,
+    sbFrontierNodes(sbFrontiers, 0, ""),
     sbMapLoop(w.regions, 0, ""),
+    sbLandmarks(w.court),
     sbMarker(w.regions, w.loc),
     "</svg>"
   ]);
